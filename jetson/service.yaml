@@ -14,4 +14,4 @@ spec:
     targetPort: 8000
   selector:
     app: vllm-gemma4
-  type: ClusterIP
+  type: LoadBalancer
