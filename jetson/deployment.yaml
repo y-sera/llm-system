@@ -19,9 +19,13 @@ spec:
       containers:
       - image: nvcr.io/nvidia/vllm:26.06-py3
         name: vllm-gemma4
+        command: ["/bin/sh", "-c"]
         args:
-        - sleep
-        - infinity
+        - vllm
+        - serve
+        - google/gemma-4-E2B-it-qat-w4a16-ct
+        - --trust-remote-code
+        - --gpu-memory-utilization 0.5
         ports:
           - containerPort: 8000
         env:
