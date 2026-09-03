@@ -1,0 +1,57 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: qwen38-27b
+  name: qwen38-27b
+  namespace: llm-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: qwen38-27b
+  template:
+    metadata:
+      labels:
+        app: qwen38-27b
+    spec:
+      runtimeClassName: nvidia
+      containers:
+      - image: vllm/vllm-openai:v0.28.0-ubuntu2404
+        name: main
+        args:
+        - "unsloth/Qwen3.8-27B-NVFP4"
+        - "--gpu-memory-utilization=0.8"
+        - "--enable-auto-tool-choice"
+        - "--tool-call-parser=qwen3_coder"
+        - "--reasoning-parser=qwen3"
+        # - "--mm-encoder-tp-mode=data"
+        - "--max-model-len=262144"
+        - "--max-num-seqs=8"
+        #- "--max-num-batched-tokens=4096"
+        - "--kv-cache-dtype=fp8"
+        - '--speculative-config={"method": "mtp", "num_speculative_tokens": 3}'
+        - "--enable-prefix-caching"
+        - "--trust-remote-code"
+        ports:
+          - containerPort: 8000
+        env:
+        - name: HF_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: hf-token-secret
+              key: token
+        volumeMounts:
+        - name: cache-volume
+          mountPath: /root/.cache/huggingface
+        - name: shm
+          mountPath: /dev/shm
+      volumes:
+      - name: cache-volume
+        hostPath:
+          path: /home/yasuaki/.cache/huggingface/ 
+      - name: shm
+        emptyDir:
+          medium: Memory
+          sizeLimit: "2Gi"
