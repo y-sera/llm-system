@@ -1,0 +1,17 @@
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app: qwen38-27b
+  name: qwen38-27b
+  namespace: llm-system
+spec:
+  ports:
+  - name: http
+    port: 8000
+    protocol: TCP
+    targetPort: 8000
+  selector:
+    app: qwen38-27b
+  type: LoadBalancer

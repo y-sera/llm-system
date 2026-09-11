@@ -1,0 +1,51 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: gemma4-e2b
+  name: gemma4-e2b
+  namespace: llm-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gemma4-e2b
+  template:
+    metadata:
+      labels:
+        app: gemma4-e2b
+    spec:
+      runtimeClassName: nvidia
+      containers:
+      - image: ghcr.io/ggml-org/llama.cpp:server-cuda13
+        name: main
+        args:
+        - "--host=0.0.0.0"
+        ports:
+          - containerPort: 8080
+        env:
+        - name: LLAMA_ARG_HF_REPO
+          value: google/gemma-4-E2B-it-qat-q4_0-gguf
+        - name: LLAMA_ARG_CTX_SIZE
+          value: 4096
+        - name: LLAMA_ARG_PORT
+          value: 8080
+        - name: HF_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: hf-token-secret
+              key: token
+        volumeMounts:
+        - name: cache-volume
+          mountPath: /models/
+        - name: shm
+          mountPath: /dev/shm
+      volumes:
+      - name: cache-volume
+        hostPath:
+          path: /home/yasuaki/.cache/huggingface/ 
+      - name: shm
+        emptyDir:
+          medium: Memory
+          sizeLimit: "1Gi"
