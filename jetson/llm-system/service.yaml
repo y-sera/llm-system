@@ -3,15 +3,15 @@ apiVersion: v1
 kind: Service
 metadata:
   labels:
-    app: qwen38-27b
-  name: qwen38-27b
+    app: gemma4-e2b
+  name: gemma4-e2b
   namespace: llm-system
 spec:
   ports:
   - name: http
-    port: 8000
+    port: 8080
     protocol: TCP
-    targetPort: 8000
+    targetPort: 8080
   selector:
-    app: qwen38-27b
+    app: gemma4-e2b
   type: LoadBalancer

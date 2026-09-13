@@ -20,17 +20,17 @@ spec:
       containers:
       - image: ghcr.io/ggml-org/llama.cpp:server-cuda13
         name: main
-        args:
-        - "--host=0.0.0.0"
         ports:
           - containerPort: 8080
         env:
+        - name: NVIDIA_DISABLE_REQUIRE
+          value: "true"
         - name: LLAMA_ARG_HF_REPO
           value: google/gemma-4-E2B-it-qat-q4_0-gguf
         - name: LLAMA_ARG_CTX_SIZE
-          value: 4096
+          value: "4096"
         - name: LLAMA_ARG_PORT
-          value: 8080
+          value: "8080"
         - name: HF_TOKEN
           valueFrom:
             secretKeyRef:
@@ -38,7 +38,7 @@ spec:
               key: token
         volumeMounts:
         - name: cache-volume
-          mountPath: /models/
+          mountPath: /root/.cache/huggingface
         - name: shm
           mountPath: /dev/shm
       volumes:
