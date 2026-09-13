@@ -27,6 +27,8 @@ spec:
           value: "true"
         - name: LLAMA_ARG_HF_REPO
           value: google/gemma-4-E2B-it-qat-q4_0-gguf
+        - name: LLAMA_ARG_REASONING
+          value: "off"
         - name: LLAMA_ARG_CTX_SIZE
           value: "4096"
         - name: LLAMA_ARG_PORT
