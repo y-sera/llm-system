@@ -23,6 +23,14 @@ COPY . /app
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --no-editable
 
+## for update pyproject.toml and uv.lock
+## docker build --target dev -t localhost/audio-app:dev .
+## docker run -d --rm --name dev localhost/audio-app:dev sleep infinity
+## docker cp dev:/app/pyproject.toml ./
+## docker cp dev:/app/uv.lock ./
+#FROM builder as dev
+#RUN uv add openai
+
 FROM python:3.12-slim
 
 # Copy the environment, but not the source code
