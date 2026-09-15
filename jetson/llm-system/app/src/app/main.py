@@ -1,13 +1,30 @@
 import io
+import logging
+import os
 import wave
-import time
 
 import numpy as np
 import pyaudio
 
 from scipy.signal import resample_poly
-
 from silero_vad import load_silero_vad
+
+
+# ============================================================
+# Logging
+# ============================================================
+
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+
+logging.basicConfig(
+    level=getattr(logging, LOG_LEVEL, logging.INFO),
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    handlers=[
+        logging.StreamHandler(),
+    ],
+)
+
+logger = logging.getLogger("audio-app")
 
 
 # ============================================================
@@ -47,11 +64,11 @@ MAX_UTTERANCE_MS = 10000
 # Load model
 # ============================================================
 
-print("Loading Silero VAD...")
+logger.info("Loading Silero VAD...")
 
 vad_model = load_silero_vad()
 
-print("VAD loaded.")
+logger.info("VAD loaded.")
 
 
 # ============================================================
@@ -100,24 +117,38 @@ def save_wav(
 # Main
 # ============================================================
 
+logger.info("Initializing PyAudio...")
+
 audio = pyaudio.PyAudio()
 
-print("Audio devices:")
+logger.info("PyAudio initialized.")
 
-for i in range(audio.get_device_count()):
+logger.info("Audio devices:")
+
+device_count = audio.get_device_count()
+
+logger.info("Device count: %d", device_count)
+
+for i in range(device_count):
     info = audio.get_device_info_by_index(i)
 
     if info["maxInputChannels"] > 0:
-        print(
+        logger.info(
+            "  [%d] %s rate=%s input_channels=%s",
             i,
             info["name"],
-            "rate=",
             info["defaultSampleRate"],
+            info["maxInputChannels"],
         )
 
 
 # Your container currently exposes the USB microphone as index 0.
 DEVICE_INDEX = 0
+
+logger.info(
+    "Opening input device index=%d...",
+    DEVICE_INDEX,
+)
 
 stream = audio.open(
     format=FORMAT,
@@ -128,10 +159,19 @@ stream = audio.open(
     frames_per_buffer=INPUT_CHUNK,
 )
 
-print()
-print("Listening...")
-print("Speak into the microphone.")
-print("Press Ctrl+C to stop.")
+logger.info("Audio stream opened successfully.")
+
+logger.info("  sample_rate=%d", INPUT_RATE)
+logger.info("  channels=%d", CHANNELS)
+logger.info(
+    "  chunk=%d samples (%d ms)",
+    INPUT_CHUNK,
+    CHUNK_MS,
+)
+
+logger.info("Listening...")
+logger.info("Speak into the microphone.")
+logger.info("Press Ctrl+C to stop.")
 
 
 # ------------------------------------------------------------
@@ -239,16 +279,15 @@ try:
 
                     speech_duration_ms = 0
                     silence_duration_ms = 0
-
                     utterance_duration_ms = 0
 
                     utterance = [
                         pre_roll.copy()
                     ]
 
-                    print(
-                        "\n[SPEECH START]",
-                        f"prob={speech_probability:.2f}",
+                    logger.info(
+                        "[SPEECH START] prob=%.2f",
+                        speech_probability,
                     )
 
             # ------------------------------------------------
@@ -301,10 +340,6 @@ try:
                             utterance
                         )
 
-                        # Add a little trailing silence.
-                        # The current utterance already contains
-                        # the silence used for VAD detection.
-
                         utterance_number += 1
 
                         filename = (
@@ -318,17 +353,17 @@ try:
                             VAD_RATE,
                         )
 
-                        print(
-                            "[SPEECH END]",
-                            f"duration={utterance_duration_ms:.0f} ms",
-                            f"saved={filename}",
+                        logger.info(
+                            "[SPEECH END] "
+                            "duration=%.0f ms saved=%s",
+                            utterance_duration_ms,
+                            filename,
                         )
 
                     else:
 
-                        print(
-                            "[IGNORED]",
-                            "speech too short",
+                        logger.info(
+                            "[IGNORED] speech too short"
                         )
 
                     speech_active = False
@@ -366,9 +401,9 @@ try:
                     VAD_RATE,
                 )
 
-                print(
-                    "[MAX LENGTH]",
-                    f"saved={filename}",
+                logger.info(
+                    "[MAX LENGTH] saved=%s",
+                    filename,
                 )
 
                 speech_active = False
@@ -382,11 +417,16 @@ try:
 
 except KeyboardInterrupt:
 
-    print("\nStopping...")
+    logger.info("Stopping...")
 
 
 finally:
 
+    logger.info("Closing audio stream...")
+
     stream.stop_stream()
     stream.close()
+
     audio.terminate()
+
+    logger.info("Audio resources released.")
