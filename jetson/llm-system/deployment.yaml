@@ -28,7 +28,7 @@ spec:
         - name: LLAMA_ARG_HF_REPO
           value: google/gemma-4-E2B-it-qat-q4_0-gguf
         - name: LLAMA_ARG_MMPROJ
-          value: gemma-4-E2B-it-mmproj.gguf
+          value: /root/.cache/huggingface/hub/models--google--gemma-4-E2B-it-qat-q4_0-gguf/snapshots/675cff42a74c774d6cb76f76d8eacb49b48c9b93/gemma-4-E2B-it-mmproj.gguf
         - name: LLAMA_ARG_REASONING
           value: "off"
         - name: LLAMA_ARG_CTX_SIZE
