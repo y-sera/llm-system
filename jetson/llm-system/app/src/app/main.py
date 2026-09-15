@@ -1,3 +1,4 @@
+import base64
 import io
 import logging
 import os
@@ -53,6 +54,17 @@ DEVICE_INDEX = int(
 OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
 OPENAI_BASE_URL = os.environ["OPENAI_BASE_URL"]
 OPENAI_MODEL = os.environ["OPENAI_MODEL"]
+
+OPENAI_PROMPT = os.getenv(
+    "OPENAI_PROMPT",
+    (
+        "この音声を日本語で"
+        "文字起こししてください。"
+        "音声に含まれている発話だけを"
+        "返してください。"
+        "説明や補足は不要です。"
+    ),
+)
 
 
 # ============================================================
@@ -182,6 +194,14 @@ def transcribe_wav(
         len(wav_data),
     )
 
+    # --------------------------------------------------------
+    # WAV -> Base64
+    # --------------------------------------------------------
+
+    audio_data = base64.b64encode(
+        wav_data
+    ).decode("ascii")
+
     try:
 
         response = client.chat.completions.create(
@@ -192,18 +212,12 @@ def transcribe_wav(
                     "content": [
                         {
                             "type": "text",
-                            "text": (
-                                "この音声を日本語で"
-                                "文字起こししてください。"
-                                "音声に含まれている発話だけを"
-                                "返してください。"
-                                "説明や補足は不要です。"
-                            ),
+                            "text": OPENAI_PROMPT,
                         },
                         {
                             "type": "input_audio",
                             "input_audio": {
-                                "data": wav_data,
+                                "data": audio_data,
                                 "format": "wav",
                             },
                         },
