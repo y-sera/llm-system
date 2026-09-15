@@ -6,6 +6,7 @@ import wave
 
 import numpy as np
 import pyaudio
+import torch
 from openai import OpenAI
 from scipy.signal import resample_poly
 from silero_vad import load_silero_vad
@@ -50,9 +51,7 @@ DEVICE_INDEX = int(
 # ============================================================
 
 OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
-
 OPENAI_BASE_URL = os.environ["OPENAI_BASE_URL"]
-
 OPENAI_MODEL = os.environ["OPENAI_MODEL"]
 
 
@@ -122,13 +121,24 @@ def save_wav(
     filename: str,
 ) -> None:
 
-    os.makedirs(
-        os.path.dirname(filename),
-        exist_ok=True,
-    )
+    try:
+        directory = os.path.dirname(filename)
 
-    with open(filename, "wb") as f:
-        f.write(wav_data)
+        if directory:
+            os.makedirs(
+                directory,
+                exist_ok=True,
+            )
+
+        with open(filename, "wb") as f:
+            f.write(wav_data)
+
+    except Exception:
+        logger.exception(
+            "Failed to save WAV: %s",
+            filename,
+        )
+        raise
 
 
 def resample_audio(
@@ -165,6 +175,13 @@ def transcribe_wav(
         "Sending audio to OpenAI-compatible API"
     )
 
+    logger.debug(
+        "API request: base_url=%s model=%s audio_size=%d bytes",
+        OPENAI_BASE_URL,
+        OPENAI_MODEL,
+        len(wav_data),
+    )
+
     try:
 
         response = client.chat.completions.create(
@@ -196,13 +213,19 @@ def transcribe_wav(
             temperature=0,
         )
 
-    except Exception:
+    except Exception as e:
 
         logger.exception(
-            "Transcription API request failed"
+            "Transcription API request failed: %s",
+            e,
         )
 
         return None
+
+    logger.debug(
+        "API response received: %s",
+        response,
+    )
 
     try:
 
@@ -215,13 +238,99 @@ def transcribe_wav(
     ):
 
         logger.error(
-            "Unexpected API response: %s",
+            "Unexpected API response: %r",
             response,
         )
 
         return None
 
+    if not text:
+
+        logger.warning(
+            "API returned empty transcription"
+        )
+
+        return None
+
     return text
+
+
+# ============================================================
+# Save and transcribe
+# ============================================================
+
+def process_recording(
+    pcm_data: bytes,
+    utterance_id: int,
+) -> None:
+
+    logger.info(
+        "Processing recording #%04d: PCM size=%d bytes",
+        utterance_id,
+        len(pcm_data),
+    )
+
+    # --------------------------------------------------------
+    # WAV
+    # --------------------------------------------------------
+
+    try:
+
+        wav_data = pcm_to_wav_bytes(
+            pcm_data,
+            INPUT_RATE,
+            CHANNELS,
+            2,
+        )
+
+        filename = os.path.join(
+            OUTPUT_DIR,
+            (
+                f"utterance_"
+                f"{utterance_id:04d}.wav"
+            ),
+        )
+
+        save_wav(
+            wav_data,
+            filename,
+        )
+
+        logger.info(
+            "Saved WAV: %s (%.1f KB)",
+            filename,
+            len(wav_data) / 1024,
+        )
+
+    except Exception:
+
+        logger.exception(
+            "Recording processing failed while saving WAV"
+        )
+
+        return
+
+    # --------------------------------------------------------
+    # Transcription
+    # --------------------------------------------------------
+
+    text = transcribe_wav(
+        wav_data
+    )
+
+    if text:
+
+        logger.info(
+            "Transcription: %s",
+            text,
+        )
+
+    else:
+
+        logger.warning(
+            "Transcription failed for recording #%04d",
+            utterance_id,
+        )
 
 
 # ============================================================
@@ -250,10 +359,29 @@ def main():
     )
 
     logger.info(
+        "  output_dir=%s",
+        os.path.abspath(OUTPUT_DIR),
+    )
+
+    logger.info(
+        "  device_index=%d",
+        DEVICE_INDEX,
+    )
+
+    logger.info(
         "Loading Silero VAD"
     )
 
-    vad_model = load_silero_vad()
+    try:
+        vad_model = load_silero_vad()
+
+    except Exception:
+
+        logger.exception(
+            "Failed to load Silero VAD"
+        )
+
+        raise
 
     logger.info(
         "Initializing PyAudio"
@@ -278,11 +406,23 @@ def main():
             info,
         )
 
-    device_info = (
-        pa.get_device_info_by_index(
-            DEVICE_INDEX
+    try:
+
+        device_info = (
+            pa.get_device_info_by_index(
+                DEVICE_INDEX
+            )
         )
-    )
+
+    except Exception:
+
+        logger.exception(
+            "Failed to get audio device index %d",
+            DEVICE_INDEX,
+        )
+
+        pa.terminate()
+        raise
 
     logger.info(
         "Using input device %d: %s",
@@ -290,14 +430,25 @@ def main():
         device_info["name"],
     )
 
-    stream = pa.open(
-        format=FORMAT,
-        channels=CHANNELS,
-        rate=INPUT_RATE,
-        input=True,
-        input_device_index=DEVICE_INDEX,
-        frames_per_buffer=INPUT_CHUNK,
-    )
+    try:
+
+        stream = pa.open(
+            format=FORMAT,
+            channels=CHANNELS,
+            rate=INPUT_RATE,
+            input=True,
+            input_device_index=DEVICE_INDEX,
+            frames_per_buffer=INPUT_CHUNK,
+        )
+
+    except Exception:
+
+        logger.exception(
+            "Failed to open audio input stream"
+        )
+
+        pa.terminate()
+        raise
 
     logger.info(
         "Audio stream opened: "
@@ -337,19 +488,52 @@ def main():
         PRE_ROLL_MS / CHUNK_MS
     )
 
+    # VAD診断用
+    last_vad_log_time = time.monotonic()
+
     try:
 
         while True:
 
-            data = stream.read(
-                INPUT_CHUNK,
-                exception_on_overflow=False,
-            )
+            # ------------------------------------------------
+            # Audio input
+            # ------------------------------------------------
+
+            try:
+
+                data = stream.read(
+                    INPUT_CHUNK,
+                    exception_on_overflow=False,
+                )
+
+            except Exception:
+
+                logger.exception(
+                    "Audio input read failed"
+                )
+
+                continue
+
+            if not data:
+
+                logger.warning(
+                    "Audio input returned empty data"
+                )
+
+                continue
 
             audio = np.frombuffer(
                 data,
                 dtype=np.int16,
             )
+
+            if len(audio) == 0:
+
+                logger.warning(
+                    "Audio input returned zero samples"
+                )
+
+                continue
 
             # ------------------------------------------------
             # 44.1 kHz -> 16 kHz
@@ -366,6 +550,7 @@ def main():
             # ------------------------------------------------
 
             is_speech = False
+            max_speech_probability = 0.0
 
             for start in range(
                 0,
@@ -380,19 +565,43 @@ def main():
                 if len(chunk) < VAD_CHUNK:
                     break
 
-                import torch
-
                 speech_probability = vad_model(
                     torch.from_numpy(chunk),
                     VAD_RATE,
                 ).item()
 
+                max_speech_probability = max(
+                    max_speech_probability,
+                    speech_probability,
+                )
+
                 if (
                     speech_probability
                     >= VAD_THRESHOLD
                 ):
+
                     is_speech = True
                     break
+
+            # ------------------------------------------------
+            # Periodic VAD diagnostic log
+            # ------------------------------------------------
+
+            now = time.monotonic()
+
+            if (
+                now - last_vad_log_time
+                >= 5.0
+            ):
+
+                logger.debug(
+                    "VAD status: speech=%s probability=%.3f recording=%s",
+                    is_speech,
+                    max_speech_probability,
+                    speech_started,
+                )
+
+                last_vad_log_time = now
 
             # ------------------------------------------------
             # Pre-roll
@@ -404,6 +613,7 @@ def main():
                 len(pre_roll_frames)
                 > pre_roll_frame_count
             ):
+
                 pre_roll_frames.pop(0)
 
             # ------------------------------------------------
@@ -429,7 +639,7 @@ def main():
                         )
 
                         logger.info(
-                            "Speech started"
+                            "Recording started"
                         )
 
                 else:
@@ -458,65 +668,17 @@ def main():
                     ):
 
                         logger.info(
-                            "Speech ended"
+                            "Recording ended"
                         )
-
-                        # ------------------------------------
-                        # WAV
-                        # ------------------------------------
 
                         pcm_data = b"".join(
                             utterance_frames
                         )
 
-                        wav_data = (
-                            pcm_to_wav_bytes(
-                                pcm_data,
-                                INPUT_RATE,
-                                CHANNELS,
-                                2,
-                            )
+                        process_recording(
+                            pcm_data,
+                            utterance_id,
                         )
-
-                        filename = os.path.join(
-                            OUTPUT_DIR,
-                            (
-                                f"utterance_"
-                                f"{utterance_id:04d}.wav"
-                            ),
-                        )
-
-                        save_wav(
-                            wav_data,
-                            filename,
-                        )
-
-                        logger.info(
-                            "Saved WAV: %s (%.1f KB)",
-                            filename,
-                            len(wav_data) / 1024,
-                        )
-
-                        # ------------------------------------
-                        # Transcription
-                        # ------------------------------------
-
-                        text = transcribe_wav(
-                            wav_data
-                        )
-
-                        if text:
-
-                            logger.info(
-                                "Transcription: %s",
-                                text,
-                            )
-
-                        else:
-
-                            logger.warning(
-                                "Transcription failed"
-                            )
 
                         utterance_id += 1
 
@@ -543,45 +705,18 @@ def main():
                     "Maximum utterance length reached"
                 )
 
+                logger.info(
+                    "Recording ended"
+                )
+
                 pcm_data = b"".join(
                     utterance_frames
                 )
 
-                wav_data = pcm_to_wav_bytes(
+                process_recording(
                     pcm_data,
-                    INPUT_RATE,
-                    CHANNELS,
-                    2,
+                    utterance_id,
                 )
-
-                filename = os.path.join(
-                    OUTPUT_DIR,
-                    (
-                        f"utterance_"
-                        f"{utterance_id:04d}.wav"
-                    ),
-                )
-
-                save_wav(
-                    wav_data,
-                    filename,
-                )
-
-                logger.info(
-                    "Saved WAV: %s",
-                    filename,
-                )
-
-                text = transcribe_wav(
-                    wav_data
-                )
-
-                if text:
-
-                    logger.info(
-                        "Transcription: %s",
-                        text,
-                    )
 
                 utterance_id += 1
 
