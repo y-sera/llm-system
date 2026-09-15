@@ -1,0 +1,28 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: audio-app
+  name: audio-app
+  namespace: llm-system
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: audio-app
+  template:
+    metadata:
+      labels:
+        app: audio-app
+    spec:
+      #runtimeClassName: nvidia
+      containers:
+      - image: harbor.cluster.orenet.net/llm-system/audio-app:latest
+        name: main
+        env:
+        resources:
+          limits:
+            devic.es/mic: 1
