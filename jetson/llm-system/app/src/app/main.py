@@ -1,34 +1,18 @@
 import io
 import logging
 import os
+import time
 import wave
 
 import numpy as np
 import pyaudio
-
+from openai import OpenAI
 from scipy.signal import resample_poly
 from silero_vad import load_silero_vad
 
 
 # ============================================================
-# Logging
-# ============================================================
-
-LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
-
-logging.basicConfig(
-    level=getattr(logging, LOG_LEVEL, logging.INFO),
-    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    handlers=[
-        logging.StreamHandler(),
-    ],
-)
-
-logger = logging.getLogger("audio-app")
-
-
-# ============================================================
-# Audio configuration
+# Configuration
 # ============================================================
 
 INPUT_RATE = 44100
@@ -37,17 +21,10 @@ VAD_RATE = 16000
 CHANNELS = 1
 FORMAT = pyaudio.paInt16
 
-# PyAudio capture chunk
 CHUNK_MS = 32
 INPUT_CHUNK = int(INPUT_RATE * CHUNK_MS / 1000)
 
-# Silero VAD uses 512 samples at 16 kHz
 VAD_CHUNK = 512
-
-
-# ============================================================
-# VAD configuration
-# ============================================================
 
 VAD_THRESHOLD = 0.5
 
@@ -55,378 +32,581 @@ MIN_SPEECH_MS = 300
 MIN_SILENCE_MS = 700
 
 PRE_ROLL_MS = 300
-POST_ROLL_MS = 200
 
 MAX_UTTERANCE_MS = 10000
 
+OUTPUT_DIR = os.getenv(
+    "OUTPUT_DIR",
+    "./recordings",
+)
 
-# ============================================================
-# Load model
-# ============================================================
-
-logger.info("Loading Silero VAD...")
-
-vad_model = load_silero_vad()
-
-logger.info("VAD loaded.")
+DEVICE_INDEX = int(
+    os.getenv("AUDIO_DEVICE_INDEX", "0")
+)
 
 
 # ============================================================
-# Utilities
+# OpenAI configuration
 # ============================================================
 
-def resample_to_16k(audio: np.ndarray) -> np.ndarray:
-    """
-    int16 mono 44.1kHz -> float32 mono 16kHz
-    """
+OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
 
-    audio_f32 = audio.astype(np.float32) / 32768.0
+OPENAI_BASE_URL = os.environ["OPENAI_BASE_URL"]
 
-    resampled = resample_poly(
-        audio_f32,
-        VAD_RATE,
-        INPUT_RATE,
-    )
+OPENAI_MODEL = os.environ["OPENAI_MODEL"]
 
-    return resampled.astype(np.float32)
+
+# ============================================================
+# Logging
+# ============================================================
+
+LOG_LEVEL = os.getenv(
+    "LOG_LEVEL",
+    "INFO",
+).upper()
+
+logging.basicConfig(
+    level=getattr(
+        logging,
+        LOG_LEVEL,
+        logging.INFO,
+    ),
+    format=(
+        "%(asctime)s "
+        "%(levelname)s "
+        "%(name)s: "
+        "%(message)s"
+    ),
+    handlers=[
+        logging.StreamHandler()
+    ],
+)
+
+logger = logging.getLogger("audio-app")
+
+
+# ============================================================
+# OpenAI client
+# ============================================================
+
+client = OpenAI(
+    api_key=OPENAI_API_KEY,
+    base_url=OPENAI_BASE_URL,
+)
+
+
+# ============================================================
+# Audio utility
+# ============================================================
+
+def pcm_to_wav_bytes(
+    pcm_data: bytes,
+    sample_rate: int,
+    channels: int = 1,
+    sample_width: int = 2,
+) -> bytes:
+
+    buffer = io.BytesIO()
+
+    with wave.open(buffer, "wb") as wf:
+        wf.setnchannels(channels)
+        wf.setsampwidth(sample_width)
+        wf.setframerate(sample_rate)
+        wf.writeframes(pcm_data)
+
+    return buffer.getvalue()
 
 
 def save_wav(
-    path: str,
-    pcm: np.ndarray,
-    sample_rate: int,
-):
-    """
-    float32 [-1, 1] -> PCM16 WAV
-    """
+    wav_data: bytes,
+    filename: str,
+) -> None:
 
-    pcm16 = np.clip(
-        pcm * 32767.0,
-        -32768,
-        32767,
-    ).astype(np.int16)
+    os.makedirs(
+        os.path.dirname(filename),
+        exist_ok=True,
+    )
 
-    with wave.open(path, "wb") as wf:
-        wf.setnchannels(1)
-        wf.setsampwidth(2)
-        wf.setframerate(sample_rate)
-        wf.writeframes(pcm16.tobytes())
+    with open(filename, "wb") as f:
+        f.write(wav_data)
+
+
+def resample_audio(
+    audio: np.ndarray,
+    source_rate: int,
+    target_rate: int,
+) -> np.ndarray:
+
+    audio_float = (
+        audio.astype(np.float32)
+        / 32768.0
+    )
+
+    resampled = resample_poly(
+        audio_float,
+        target_rate,
+        source_rate,
+    )
+
+    return resampled.astype(
+        np.float32
+    )
+
+
+# ============================================================
+# Transcription
+# ============================================================
+
+def transcribe_wav(
+    wav_data: bytes,
+) -> str | None:
+
+    logger.info(
+        "Sending audio to OpenAI-compatible API"
+    )
+
+    try:
+
+        response = client.chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": (
+                                "この音声を日本語で"
+                                "文字起こししてください。"
+                                "音声に含まれている発話だけを"
+                                "返してください。"
+                                "説明や補足は不要です。"
+                            ),
+                        },
+                        {
+                            "type": "input_audio",
+                            "input_audio": {
+                                "data": wav_data,
+                                "format": "wav",
+                            },
+                        },
+                    ],
+                }
+            ],
+            temperature=0,
+        )
+
+    except Exception:
+
+        logger.exception(
+            "Transcription API request failed"
+        )
+
+        return None
+
+    try:
+
+        text = response.choices[0].message.content
+
+    except (
+        AttributeError,
+        IndexError,
+        TypeError,
+    ):
+
+        logger.error(
+            "Unexpected API response: %s",
+            response,
+        )
+
+        return None
+
+    return text
 
 
 # ============================================================
 # Main
 # ============================================================
 
-logger.info("Initializing PyAudio...")
+def main():
 
-audio = pyaudio.PyAudio()
+    os.makedirs(
+        OUTPUT_DIR,
+        exist_ok=True,
+    )
 
-logger.info("PyAudio initialized.")
+    logger.info(
+        "OpenAI-compatible API configuration:"
+    )
 
-logger.info("Audio devices:")
+    logger.info(
+        "  base_url=%s",
+        OPENAI_BASE_URL,
+    )
 
-device_count = audio.get_device_count()
+    logger.info(
+        "  model=%s",
+        OPENAI_MODEL,
+    )
 
-logger.info("Device count: %d", device_count)
+    logger.info(
+        "Loading Silero VAD"
+    )
 
-for i in range(device_count):
-    info = audio.get_device_info_by_index(i)
+    vad_model = load_silero_vad()
 
-    if info["maxInputChannels"] > 0:
+    logger.info(
+        "Initializing PyAudio"
+    )
+
+    pa = pyaudio.PyAudio()
+
+    logger.info(
+        "Audio device count: %d",
+        pa.get_device_count(),
+    )
+
+    for i in range(
+        pa.get_device_count()
+    ):
+
+        info = pa.get_device_info_by_index(i)
+
         logger.info(
-            "  [%d] %s rate=%s input_channels=%s",
+            "Audio device %d: %s",
             i,
-            info["name"],
-            info["defaultSampleRate"],
-            info["maxInputChannels"],
+            info,
         )
 
-
-# Your container currently exposes the USB microphone as index 0.
-DEVICE_INDEX = 0
-
-logger.info(
-    "Opening input device index=%d...",
-    DEVICE_INDEX,
-)
-
-stream = audio.open(
-    format=FORMAT,
-    channels=CHANNELS,
-    rate=INPUT_RATE,
-    input=True,
-    input_device_index=DEVICE_INDEX,
-    frames_per_buffer=INPUT_CHUNK,
-)
-
-logger.info("Audio stream opened successfully.")
-
-logger.info("  sample_rate=%d", INPUT_RATE)
-logger.info("  channels=%d", CHANNELS)
-logger.info(
-    "  chunk=%d samples (%d ms)",
-    INPUT_CHUNK,
-    CHUNK_MS,
-)
-
-logger.info("Listening...")
-logger.info("Speak into the microphone.")
-logger.info("Press Ctrl+C to stop.")
-
-
-# ------------------------------------------------------------
-# State
-# ------------------------------------------------------------
-
-speech_active = False
-
-utterance = []
-
-speech_duration_ms = 0
-silence_duration_ms = 0
-utterance_duration_ms = 0
-
-utterance_number = 0
-
-# Keep some audio before speech starts.
-pre_roll_samples = int(
-    VAD_RATE * PRE_ROLL_MS / 1000
-)
-
-pre_roll = np.zeros(
-    pre_roll_samples,
-    dtype=np.float32,
-)
-
-
-# Silero VAD state
-vad_state = None
-
-
-try:
-
-    while True:
-
-        # ----------------------------------------------------
-        # Capture audio
-        # ----------------------------------------------------
-
-        raw = stream.read(
-            INPUT_CHUNK,
-            exception_on_overflow=False,
+    device_info = (
+        pa.get_device_info_by_index(
+            DEVICE_INDEX
         )
+    )
 
-        audio_input = np.frombuffer(
-            raw,
-            dtype=np.int16,
-        )
+    logger.info(
+        "Using input device %d: %s",
+        DEVICE_INDEX,
+        device_info["name"],
+    )
 
-        # ----------------------------------------------------
-        # Resample 44.1k -> 16k
-        # ----------------------------------------------------
+    stream = pa.open(
+        format=FORMAT,
+        channels=CHANNELS,
+        rate=INPUT_RATE,
+        input=True,
+        input_device_index=DEVICE_INDEX,
+        frames_per_buffer=INPUT_CHUNK,
+    )
 
-        audio_16k = resample_to_16k(audio_input)
+    logger.info(
+        "Audio stream opened: "
+        "rate=%d chunk=%d",
+        INPUT_RATE,
+        INPUT_CHUNK,
+    )
 
-        # ----------------------------------------------------
-        # Feed VAD in 512-sample chunks
-        # ----------------------------------------------------
+    logger.info(
+        "Listening..."
+    )
 
-        offset = 0
+    speech_started = False
 
-        while offset + VAD_CHUNK <= len(audio_16k):
+    speech_frames = 0
+    silence_frames = 0
 
-            chunk = audio_16k[
-                offset:
-                offset + VAD_CHUNK
-            ]
+    utterance_frames = []
 
-            offset += VAD_CHUNK
+    pre_roll_frames = []
 
-            # Silero VAD expects a torch tensor
-            import torch
+    utterance_id = 1
 
-            tensor = torch.from_numpy(chunk)
+    min_speech_frames = int(
+        MIN_SPEECH_MS / CHUNK_MS
+    )
 
-            speech_probability = vad_model(
-                tensor,
-                VAD_RATE,
-            ).item()
+    min_silence_frames = int(
+        MIN_SILENCE_MS / CHUNK_MS
+    )
 
-            is_speech = (
-                speech_probability >= VAD_THRESHOLD
+    max_utterance_frames = int(
+        MAX_UTTERANCE_MS / CHUNK_MS
+    )
+
+    pre_roll_frame_count = int(
+        PRE_ROLL_MS / CHUNK_MS
+    )
+
+    try:
+
+        while True:
+
+            data = stream.read(
+                INPUT_CHUNK,
+                exception_on_overflow=False,
+            )
+
+            audio = np.frombuffer(
+                data,
+                dtype=np.int16,
             )
 
             # ------------------------------------------------
-            # Speech start
+            # 44.1 kHz -> 16 kHz
             # ------------------------------------------------
 
-            if not speech_active:
+            vad_audio = resample_audio(
+                audio,
+                INPUT_RATE,
+                VAD_RATE,
+            )
 
-                # Maintain pre-roll
-                pre_roll = np.concatenate([
-                    pre_roll,
-                    chunk,
-                ])
+            # ------------------------------------------------
+            # VAD
+            # ------------------------------------------------
 
-                if len(pre_roll) > pre_roll_samples:
-                    pre_roll = pre_roll[
-                        -pre_roll_samples:
-                    ]
+            is_speech = False
 
-                if is_speech:
+            for start in range(
+                0,
+                len(vad_audio),
+                VAD_CHUNK,
+            ):
 
-                    speech_active = True
+                chunk = vad_audio[
+                    start:start + VAD_CHUNK
+                ]
 
-                    speech_duration_ms = 0
-                    silence_duration_ms = 0
-                    utterance_duration_ms = 0
+                if len(chunk) < VAD_CHUNK:
+                    break
 
-                    utterance = [
-                        pre_roll.copy()
-                    ]
+                import torch
 
-                    logger.info(
-                        "[SPEECH START] prob=%.2f",
-                        speech_probability,
+                speech_probability = vad_model(
+                    torch.from_numpy(chunk),
+                    VAD_RATE,
+                ).item()
+
+                if (
+                    speech_probability
+                    >= VAD_THRESHOLD
+                ):
+                    is_speech = True
+                    break
+
+            # ------------------------------------------------
+            # Pre-roll
+            # ------------------------------------------------
+
+            pre_roll_frames.append(data)
+
+            if (
+                len(pre_roll_frames)
+                > pre_roll_frame_count
+            ):
+                pre_roll_frames.pop(0)
+
+            # ------------------------------------------------
+            # Speech
+            # ------------------------------------------------
+
+            if is_speech:
+
+                speech_frames += 1
+                silence_frames = 0
+
+                if not speech_started:
+
+                    if (
+                        speech_frames
+                        >= min_speech_frames
+                    ):
+
+                        speech_started = True
+
+                        utterance_frames = (
+                            pre_roll_frames.copy()
+                        )
+
+                        logger.info(
+                            "Speech started"
+                        )
+
+                else:
+
+                    utterance_frames.append(
+                        data
                     )
 
             # ------------------------------------------------
-            # Speech active
+            # Silence
             # ------------------------------------------------
 
             else:
 
-                utterance.append(chunk)
+                silence_frames += 1
 
-                utterance_duration_ms += (
-                    len(chunk)
-                    * 1000
-                    / VAD_RATE
-                )
+                if speech_started:
 
-                if is_speech:
-
-                    speech_duration_ms += (
-                        len(chunk)
-                        * 1000
-                        / VAD_RATE
+                    utterance_frames.append(
+                        data
                     )
-
-                    silence_duration_ms = 0
-
-                else:
-
-                    silence_duration_ms += (
-                        len(chunk)
-                        * 1000
-                        / VAD_RATE
-                    )
-
-                # --------------------------------------------
-                # End of utterance
-                # --------------------------------------------
-
-                if (
-                    silence_duration_ms
-                    >= MIN_SILENCE_MS
-                ):
 
                     if (
-                        speech_duration_ms
-                        >= MIN_SPEECH_MS
+                        silence_frames
+                        >= min_silence_frames
                     ):
 
-                        audio_data = np.concatenate(
-                            utterance
+                        logger.info(
+                            "Speech ended"
                         )
 
-                        utterance_number += 1
+                        # ------------------------------------
+                        # WAV
+                        # ------------------------------------
 
-                        filename = (
-                            f"utterance_"
-                            f"{utterance_number:04d}.wav"
+                        pcm_data = b"".join(
+                            utterance_frames
+                        )
+
+                        wav_data = (
+                            pcm_to_wav_bytes(
+                                pcm_data,
+                                INPUT_RATE,
+                                CHANNELS,
+                                2,
+                            )
+                        )
+
+                        filename = os.path.join(
+                            OUTPUT_DIR,
+                            (
+                                f"utterance_"
+                                f"{utterance_id:04d}.wav"
+                            ),
                         )
 
                         save_wav(
-                            filename,
-                            audio_data,
-                            VAD_RATE,
-                        )
-
-                        logger.info(
-                            "[SPEECH END] "
-                            "duration=%.0f ms saved=%s",
-                            utterance_duration_ms,
+                            wav_data,
                             filename,
                         )
 
-                    else:
-
                         logger.info(
-                            "[IGNORED] speech too short"
+                            "Saved WAV: %s (%.1f KB)",
+                            filename,
+                            len(wav_data) / 1024,
                         )
 
-                    speech_active = False
+                        # ------------------------------------
+                        # Transcription
+                        # ------------------------------------
 
-                    utterance = []
+                        text = transcribe_wav(
+                            wav_data
+                        )
 
-                    speech_duration_ms = 0
-                    silence_duration_ms = 0
-                    utterance_duration_ms = 0
+                        if text:
+
+                            logger.info(
+                                "Transcription: %s",
+                                text,
+                            )
+
+                        else:
+
+                            logger.warning(
+                                "Transcription failed"
+                            )
+
+                        utterance_id += 1
+
+                        # ------------------------------------
+                        # Reset
+                        # ------------------------------------
+
+                        speech_started = False
+                        speech_frames = 0
+                        silence_frames = 0
+                        utterance_frames = []
 
             # ------------------------------------------------
             # Maximum utterance length
             # ------------------------------------------------
 
             if (
-                speech_active
-                and utterance_duration_ms
-                >= MAX_UTTERANCE_MS
+                speech_started
+                and len(utterance_frames)
+                >= max_utterance_frames
             ):
 
-                audio_data = np.concatenate(
-                    utterance
+                logger.warning(
+                    "Maximum utterance length reached"
                 )
 
-                utterance_number += 1
+                pcm_data = b"".join(
+                    utterance_frames
+                )
 
-                filename = (
-                    f"utterance_"
-                    f"{utterance_number:04d}.wav"
+                wav_data = pcm_to_wav_bytes(
+                    pcm_data,
+                    INPUT_RATE,
+                    CHANNELS,
+                    2,
+                )
+
+                filename = os.path.join(
+                    OUTPUT_DIR,
+                    (
+                        f"utterance_"
+                        f"{utterance_id:04d}.wav"
+                    ),
                 )
 
                 save_wav(
+                    wav_data,
                     filename,
-                    audio_data,
-                    VAD_RATE,
                 )
 
                 logger.info(
-                    "[MAX LENGTH] saved=%s",
+                    "Saved WAV: %s",
                     filename,
                 )
 
-                speech_active = False
+                text = transcribe_wav(
+                    wav_data
+                )
 
-                utterance = []
+                if text:
 
-                speech_duration_ms = 0
-                silence_duration_ms = 0
-                utterance_duration_ms = 0
+                    logger.info(
+                        "Transcription: %s",
+                        text,
+                    )
+
+                utterance_id += 1
+
+                speech_started = False
+                speech_frames = 0
+                silence_frames = 0
+                utterance_frames = []
+
+    except KeyboardInterrupt:
+
+        logger.info(
+            "Stopping..."
+        )
+
+    finally:
+
+        stream.stop_stream()
+        stream.close()
+
+        pa.terminate()
+
+        logger.info(
+            "Audio application stopped"
+        )
 
 
-except KeyboardInterrupt:
-
-    logger.info("Stopping...")
-
-
-finally:
-
-    logger.info("Closing audio stream...")
-
-    stream.stop_stream()
-    stream.close()
-
-    audio.terminate()
-
-    logger.info("Audio resources released.")
+if __name__ == "__main__":
+    main()
