@@ -420,7 +420,7 @@ def main():
 
     try:
         device_index= find_audio_device(pa)
-        device_info = pa.get_device_info_by_index(i)
+        device_info = pa.get_device_info_by_index(device_index)
 
     except Exception:
         pa.terminate()
