@@ -42,11 +42,6 @@ OUTPUT_DIR = os.getenv(
     "./recordings",
 )
 
-DEVICE_INDEX = int(
-    os.getenv("AUDIO_DEVICE_INDEX", "0")
-)
-
-
 # ============================================================
 # OpenAI configuration
 # ============================================================
@@ -109,6 +104,26 @@ client = OpenAI(
 # ============================================================
 # Audio utility
 # ============================================================
+
+def find_audio_device(pa):
+    for i in range(pa.get_device_count()):
+        info = pa.get_device_info_by_index(i)
+
+        logger.info(
+            "Audio device %d: name=%s input_channels=%s",
+            i,
+            info["name"],
+            info["maxInputChannels"],
+        )
+
+        if (
+            info["maxInputChannels"] > 0
+            and "USB Microphone" in info["name"]
+        ):
+            return i
+
+    raise RuntimeError("USB Microphone not found")
+
 
 def pcm_to_wav_bytes(
     pcm_data: bytes,
@@ -378,11 +393,6 @@ def main():
     )
 
     logger.info(
-        "  device_index=%d",
-        DEVICE_INDEX,
-    )
-
-    logger.info(
         "Loading Silero VAD"
     )
 
@@ -408,39 +418,16 @@ def main():
         pa.get_device_count(),
     )
 
-    for i in range(
-        pa.get_device_count()
-    ):
-
-        info = pa.get_device_info_by_index(i)
-
-        logger.info(
-            "Audio device %d: %s",
-            i,
-            info,
-        )
-
     try:
-
-        device_info = (
-            pa.get_device_info_by_index(
-                DEVICE_INDEX
-            )
-        )
+        device_index= find_audio_device(pa)
 
     except Exception:
-
-        logger.exception(
-            "Failed to get audio device index %d",
-            DEVICE_INDEX,
-        )
-
         pa.terminate()
         raise
 
     logger.info(
         "Using input device %d: %s",
-        DEVICE_INDEX,
+        device_index,
         device_info["name"],
     )
 
@@ -451,7 +438,7 @@ def main():
             channels=CHANNELS,
             rate=INPUT_RATE,
             input=True,
-            input_device_index=DEVICE_INDEX,
+            input_device_index=device_index,
             frames_per_buffer=INPUT_CHUNK,
         )
 

@@ -54,13 +54,6 @@ spec:
                 - path: /dev/fuse
         - --device
         - |
-          name: audio
-          groups:
-            - count: 10
-              paths:
-                - path: /dev/snd
-        - --device
-        - |
           name: capture
           groups:
             - paths:
