@@ -31,4 +31,4 @@ spec:
           value: google/gemma-4-E2B-it-qat-q4_0-gguf
         resources:
           limits:
-            devic.es/mic: 1
+            devic.es/audio: 1
