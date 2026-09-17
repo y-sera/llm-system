@@ -54,6 +54,13 @@ spec:
                 - path: /dev/fuse
         - --device
         - |
+          name: audio
+          groups:
+            - count: 10
+              paths:
+                - path: /dev/snd
+        - --device
+        - |
           name: capture
           groups:
             - paths:
@@ -74,13 +81,6 @@ spec:
                   mountPath: /dev/snd/controlC0
                 - path: /dev/snd/pcmC3D0c
                   mountPath: /dev/snd/pcmC0D0c
-        - --device
-        - |
-          name: audio
-          groups:
-            - count: 10
-              paths:
-                - path: /dev/snd
         name: generic-device-plugin
         resources:
           requests:
