@@ -35,7 +35,10 @@ FROM python:3.12-slim
 
 # Copy the environment, but not the source code
 COPY --from=builder /app/.venv /app/.venv
-RUN apt update && apt install -y portaudio19-dev && apt clean
+RUN apt update && \
+    apt install -y libportaudio2 && \
+    apt clean && \
+    rm -rf /var/lib/apt/lists/*
 
 # Run the application
 CMD ["/app/.venv/bin/app"]
