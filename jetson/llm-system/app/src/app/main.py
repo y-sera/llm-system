@@ -6,23 +6,25 @@ import time
 import wave
 
 import numpy as np
+import onnxruntime as ort
 import pyaudio
-import torch
 from openai import OpenAI
-from scipy.signal import resample_poly
-from silero_vad import load_silero_vad
 
 
 # ============================================================
 # Configuration
 # ============================================================
 
-INPUT_RATE = 44100
+# Microphone now directly captures at the VAD sample rate.
+INPUT_RATE = 16000
 VAD_RATE = 16000
 
 CHANNELS = 1
 FORMAT = pyaudio.paInt16
 
+# 32 ms audio chunks.
+# At 16 kHz this is exactly 512 samples, which is the
+# Silero VAD input size.
 CHUNK_MS = 32
 INPUT_CHUNK = int(INPUT_RATE * CHUNK_MS / 1000)
 
@@ -41,6 +43,12 @@ OUTPUT_DIR = os.getenv(
     "OUTPUT_DIR",
     "./recordings",
 )
+
+VAD_MODEL_PATH = os.getenv(
+    "VAD_MODEL_PATH",
+    "/app/models/silero_vad.onnx",
+)
+
 
 # ============================================================
 # OpenAI configuration
@@ -168,26 +176,139 @@ def save_wav(
         raise
 
 
-def resample_audio(
-    audio: np.ndarray,
-    source_rate: int,
-    target_rate: int,
-) -> np.ndarray:
+# ============================================================
+# Silero VAD - ONNX Runtime
+# ============================================================
 
-    audio_float = (
-        audio.astype(np.float32)
-        / 32768.0
-    )
+class SileroVAD:
+    """
+    Silero VAD using ONNX Runtime.
 
-    resampled = resample_poly(
-        audio_float,
-        target_rate,
-        source_rate,
-    )
+    The standard Silero VAD ONNX model expects:
 
-    return resampled.astype(
-        np.float32
-    )
+        input : [1, 512] float32
+        state : [2, 1, 128] float32
+        sr    : [1] int64
+
+    and returns:
+
+        output : speech probability
+        state  : updated recurrent state
+    """
+
+    def __init__(
+        self,
+        model_path: str,
+    ):
+        logger.info(
+            "Loading Silero VAD ONNX model: %s",
+            model_path,
+        )
+
+        self.session = ort.InferenceSession(
+            model_path,
+            providers=[
+                "CPUExecutionProvider",
+            ],
+        )
+
+        providers = self.session.get_providers()
+
+        logger.info(
+            "Silero VAD ONNX providers: %s",
+            providers,
+        )
+
+        # Silero VAD recurrent state.
+        self.state = np.zeros(
+            (2, 1, 128),
+            dtype=np.float32,
+        )
+
+        self.sample_rate = np.array(
+            [VAD_RATE],
+            dtype=np.int64,
+        )
+
+        # Log model I/O information once.
+        for input_meta in self.session.get_inputs():
+            logger.debug(
+                "VAD input: name=%s shape=%s type=%s",
+                input_meta.name,
+                input_meta.shape,
+                input_meta.type,
+            )
+
+        for output_meta in self.session.get_outputs():
+            logger.debug(
+                "VAD output: name=%s shape=%s type=%s",
+                output_meta.name,
+                output_meta.shape,
+                output_meta.type,
+            )
+
+    def reset(self):
+        """
+        Reset recurrent VAD state.
+        """
+        self.state.fill(0)
+
+    def __call__(
+        self,
+        chunk: np.ndarray,
+    ) -> float:
+        """
+        Run VAD inference for one 512-sample chunk.
+
+        Input:
+            float32 numpy array
+            shape: (512,)
+            range: approximately [-1.0, 1.0]
+
+        Returns:
+            Speech probability.
+        """
+
+        if chunk.dtype != np.float32:
+            chunk = chunk.astype(
+                np.float32,
+                copy=False,
+            )
+
+        if chunk.ndim != 1:
+            raise ValueError(
+                f"Expected 1-D audio chunk, "
+                f"got shape={chunk.shape}"
+            )
+
+        if len(chunk) != VAD_CHUNK:
+            raise ValueError(
+                f"Expected {VAD_CHUNK} samples, "
+                f"got {len(chunk)}"
+            )
+
+        input_data = chunk.reshape(
+            1,
+            VAD_CHUNK,
+        )
+
+        outputs = self.session.run(
+            None,
+            {
+                "input": input_data,
+                "state": self.state,
+                "sr": self.sample_rate,
+            },
+        )
+
+        speech_probability = float(
+            np.asarray(outputs[0]).reshape(-1)[0]
+        )
+
+        # The second output is the updated recurrent state.
+        self.state = outputs[1]
+
+        return speech_probability
 
 
 # ============================================================
@@ -305,6 +426,7 @@ def process_recording(
 
     try:
 
+        # Audio is now captured directly at 16 kHz.
         wav_data = pcm_to_wav_bytes(
             pcm_data,
             INPUT_RATE,
@@ -393,11 +515,29 @@ def main():
     )
 
     logger.info(
-        "Loading Silero VAD"
+        "  input_rate=%d Hz",
+        INPUT_RATE,
     )
 
+    logger.info(
+        "  vad_rate=%d Hz",
+        VAD_RATE,
+    )
+
+    logger.info(
+        "  vad_model=%s",
+        VAD_MODEL_PATH,
+    )
+
+    # --------------------------------------------------------
+    # Load Silero VAD
+    # --------------------------------------------------------
+
     try:
-        vad_model = load_silero_vad()
+
+        vad_model = SileroVAD(
+            VAD_MODEL_PATH
+        )
 
     except Exception:
 
@@ -406,6 +546,10 @@ def main():
         )
 
         raise
+
+    # --------------------------------------------------------
+    # Initialize PyAudio
+    # --------------------------------------------------------
 
     logger.info(
         "Initializing PyAudio"
@@ -419,11 +563,17 @@ def main():
     )
 
     try:
-        device_index= find_audio_device(pa)
-        device_info = pa.get_device_info_by_index(device_index)
+
+        device_index = find_audio_device(pa)
+
+        device_info = pa.get_device_info_by_index(
+            device_index
+        )
 
     except Exception:
+
         pa.terminate()
+
         raise
 
     logger.info(
@@ -432,14 +582,21 @@ def main():
         device_info["name"],
     )
 
+    # --------------------------------------------------------
+    # Open audio stream
+    # --------------------------------------------------------
+
     try:
 
         stream = pa.open(
             format=FORMAT,
             channels=CHANNELS,
+
             rate=INPUT_RATE,
+
             input=True,
             input_device_index=device_index,
+
             frames_per_buffer=INPUT_CHUNK,
         )
 
@@ -450,6 +607,7 @@ def main():
         )
 
         pa.terminate()
+
         raise
 
     logger.info(
@@ -490,7 +648,7 @@ def main():
         PRE_ROLL_MS / CHUNK_MS
     )
 
-    # VAD診断用
+    # VAD diagnostic log
     last_vad_log_time = time.monotonic()
 
     try:
@@ -524,6 +682,10 @@ def main():
 
                 continue
 
+            # ------------------------------------------------
+            # 16 kHz PCM -> float32
+            # ------------------------------------------------
+
             audio = np.frombuffer(
                 data,
                 dtype=np.int16,
@@ -537,14 +699,22 @@ def main():
 
                 continue
 
-            # ------------------------------------------------
-            # 44.1 kHz -> 16 kHz
-            # ------------------------------------------------
+            if len(audio) != VAD_CHUNK:
 
-            vad_audio = resample_audio(
-                audio,
-                INPUT_RATE,
-                VAD_RATE,
+                logger.warning(
+                    "Unexpected audio chunk size: %d samples "
+                    "(expected %d)",
+                    len(audio),
+                    VAD_CHUNK,
+                )
+
+                continue
+
+            vad_audio = (
+                audio.astype(
+                    np.float32
+                )
+                / 32768.0
             )
 
             # ------------------------------------------------
@@ -554,36 +724,20 @@ def main():
             is_speech = False
             max_speech_probability = 0.0
 
-            for start in range(
-                0,
-                len(vad_audio),
-                VAD_CHUNK,
+            speech_probability = vad_model(
+                vad_audio
+            )
+
+            max_speech_probability = (
+                speech_probability
+            )
+
+            if (
+                speech_probability
+                >= VAD_THRESHOLD
             ):
 
-                chunk = vad_audio[
-                    start:start + VAD_CHUNK
-                ]
-
-                if len(chunk) < VAD_CHUNK:
-                    break
-
-                speech_probability = vad_model(
-                    torch.from_numpy(chunk),
-                    VAD_RATE,
-                ).item()
-
-                max_speech_probability = max(
-                    max_speech_probability,
-                    speech_probability,
-                )
-
-                if (
-                    speech_probability
-                    >= VAD_THRESHOLD
-                ):
-
-                    is_speech = True
-                    break
+                is_speech = True
 
             # ------------------------------------------------
             # Periodic VAD diagnostic log
