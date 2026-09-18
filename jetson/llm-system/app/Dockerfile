@@ -38,7 +38,11 @@ COPY --from=builder /app/.venv /app/.venv
 RUN apt update && \
     apt install -y libportaudio2 && \
     apt clean && \
-    rm -rf /var/lib/apt/lists/*
+    rm -rf /var/lib/apt/lists/* && \
+    mkdir -p /app/models && \
+    curl -L \
+      https://github.com/snakers4/silero-vad/raw/master/src/silero_vad/data/silero_vad.onnx \
+      -o /app/models/silero_vad.onnx
 
 # Run the application
 CMD ["/app/.venv/bin/app"]
