@@ -730,7 +730,7 @@ def main():
             speech_probability = vad_model(
                 vad_audio
             )
-            logger.info("After VAD: %.4f", vad_probability)
+            logger.info("After VAD: %.4f", speech_probability)
 
             max_speech_probability = (
                 speech_probability
