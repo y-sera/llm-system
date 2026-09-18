@@ -23,6 +23,11 @@ COPY . /app
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --no-editable
 
+RUN mkdir -p /app/models && \
+    curl -L \
+      https://github.com/snakers4/silero-vad/raw/master/src/silero_vad/data/silero_vad.onnx \
+      -o /app/models/silero_vad.onnx
+
 ## for update pyproject.toml and uv.lock
 ## docker build --target dev -t localhost/audio-app:dev .
 ## docker run -d --rm --name dev localhost/audio-app:dev sleep infinity
@@ -35,14 +40,11 @@ FROM python:3.12-slim
 
 # Copy the environment, but not the source code
 COPY --from=builder /app/.venv /app/.venv
+COPY --from=builder /app/models /app/models
 RUN apt update && \
     apt install -y libportaudio2 && \
     apt clean && \
-    rm -rf /var/lib/apt/lists/* && \
-    mkdir -p /app/models && \
-    curl -L \
-      https://github.com/snakers4/silero-vad/raw/master/src/silero_vad/data/silero_vad.onnx \
-      -o /app/models/silero_vad.onnx
+    rm -rf /var/lib/apt/lists/*
 
 # Run the application
 CMD ["/app/.venv/bin/app"]
