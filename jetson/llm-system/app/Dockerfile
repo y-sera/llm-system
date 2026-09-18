@@ -2,7 +2,7 @@
 FROM python:3.12-slim AS builder
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 RUN apt update && \
-    apt install -y gcc portaudio19-dev
+    apt install -y gcc portaudio19-dev curl
 
 # Use the system Python across both stages
 ENV UV_PYTHON_DOWNLOADS=0
