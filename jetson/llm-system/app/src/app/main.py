@@ -659,6 +659,7 @@ def main():
             # Audio input
             # ------------------------------------------------
 
+            logger.info("Before audio read")
             try:
 
                 data = stream.read(
@@ -673,6 +674,7 @@ def main():
                 )
 
                 continue
+            logger.info("After audio read: %d bytes", len(data))
 
             if not data:
 
@@ -724,9 +726,11 @@ def main():
             is_speech = False
             max_speech_probability = 0.0
 
+            logger.info("Before VAD")
             speech_probability = vad_model(
                 vad_audio
             )
+            logger.info("After VAD: %.4f", vad_probability)
 
             max_speech_probability = (
                 speech_probability
