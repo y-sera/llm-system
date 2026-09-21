@@ -38,9 +38,21 @@ VAD_THRESHOLD = float(os.getenv("VAD_THRESHOLD", "0.3"))
 VAD_THRESHOLD_END = float(os.getenv("VAD_THRESHOLD_END", "0.2"))
 
 # Linear gain applied ONLY to the float signal handed to the VAD model.
-# Does not affect the PCM saved to the WAV file. Raise this when the
-# microphone capture level is low (see the "VAD status" max_prob log).
-VAD_GAIN = float(os.getenv("VAD_GAIN", "4.0"))
+# Does not affect the PCM saved to the WAV file. Only used when the
+# automatic VAD normalisation is disabled (VAD_AUTO_NORM=0).
+VAD_GAIN = float(os.getenv("VAD_GAIN", "1.0"))
+
+# Saturation guard: fraction of a chunk pinned at the int16 rails above
+# which the capture is treated as clipping, so the gain is not applied.
+VAD_CLIP_LIMIT = float(os.getenv("VAD_CLIP_LIMIT", "0.02"))
+
+# When enabled each VAD chunk is DC-removed then robustly peak-normalised
+# to a common working range, so one build behaves well for both very quiet
+# and very hot captures. Disabled falls back to the fixed VAD_GAIN above.
+# The saved WAV bytes are unaffected either way.
+VAD_AUTO_NORM = os.getenv("VAD_AUTO_NORM", "1") == "1"
+VAD_TARGET_PEAK = float(os.getenv("VAD_TARGET_PEAK", "0.6"))
+VAD_MAX_NORM_GAIN = float(os.getenv("VAD_MAX_NORM_GAIN", "16.0"))
 
 MIN_SPEECH_MS = int(os.getenv("MIN_SPEECH_MS", "150"))
 MIN_SILENCE_MS = int(os.getenv("MIN_SILENCE_MS", "700"))
@@ -690,12 +702,20 @@ def main():
                 )
                 audio_int16 = np.frombuffer(data, dtype=np.int16)
 
+                _f = audio_int16.astype(np.float32)
+                _dc = float(_f.mean())
+                _ac_rms = float(np.sqrt(np.mean((_f - _dc) ** 2)))
+                _clip = float(np.mean(np.abs(_f) >= 32000.0))
+
                 logger.info(
-                    "Audio level: min=%d max=%d mean=%.1f rms=%.1f",
-                    audio_int16.min(),
-                    audio_int16.max(),
-                    audio_int16.mean(),
-                    np.sqrt(np.mean(audio_int16.astype(np.float32) ** 2)),
+                    "Audio level: min=%d max=%d mean=%.1f "
+                    "rms=%.1f ac_rms=%.1f clip=%.3f",
+                    int(audio_int16.min()),
+                    int(audio_int16.max()),
+                    _dc,
+                    float(np.sqrt(np.mean(_f ** 2))),
+                    _ac_rms,
+                    _clip,
                 )
 
             except Exception:
@@ -750,13 +770,42 @@ def main():
             )
 
             # Remove DC offset (Silero is trained on DC-free speech;
-            # a DC bias depresses the speech probability) and apply a
-            # linear gain for low USB-microphone capture levels.
-            # Clip to keep the model input within [-1.0, 1.0].
-            # The PCM written to the WAV file is left untouched.
+            # a DC bias depresses the speech probability). The saved WAV
+            # bytes come from the original PCM and are never touched here.
             vad_audio = vad_audio - vad_audio.mean()
+
+            # Fraction of samples pinned at the int16 rails. Computed on
+            # float magnitudes so int16 does not overflow at -32768.
+            _f32 = audio.astype(np.float32)
+            _clip_ratio = float(
+                np.mean(np.abs(_f32) >= 32000.0)
+            )
+
+            if VAD_AUTO_NORM:
+                # Robust peak target via a high percentile so a handful of
+                # clipped samples does not defeat normalisation. The cap
+                # keeps a silent noise floor from being boosted without
+                # limit. This lifts quiet capture and attenuates hot
+                # capture toward one working range for the VAD model.
+                _peak = float(
+                    np.percentile(np.abs(vad_audio), 99.0)
+                )
+
+                if _peak > 1e-4:
+                    _scale = min(
+                        VAD_TARGET_PEAK / _peak,
+                        VAD_MAX_NORM_GAIN,
+                    )
+
+                    vad_audio = vad_audio * _scale
+            else:
+                # Fixed manual gain, but never applied to a clipping chunk
+                # (amplifying a square wave only hurts the VAD score).
+                if _clip_ratio <= VAD_CLIP_LIMIT:
+                    vad_audio = vad_audio * VAD_GAIN
+
             vad_audio = np.clip(
-                vad_audio * VAD_GAIN,
+                vad_audio,
                 -1.0,
                 1.0,
             )
