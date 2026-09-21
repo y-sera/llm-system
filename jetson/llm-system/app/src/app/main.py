@@ -680,12 +680,11 @@ def main():
                 audio_int16 = np.frombuffer(data, dtype=np.int16)
 
                 logger.info(
-                    "Audio level: min=%d max=%d mean=%.1f rms=%.1f | VAD=%.4f",
+                    "Audio level: min=%d max=%d mean=%.1f rms=%.1f",
                     audio_int16.min(),
                     audio_int16.max(),
                     audio_int16.mean(),
                     np.sqrt(np.mean(audio_int16.astype(np.float32) ** 2)),
-                    speech_probability,
                 )
 
             except Exception:
