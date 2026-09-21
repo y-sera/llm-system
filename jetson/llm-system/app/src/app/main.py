@@ -680,11 +680,12 @@ def main():
                 audio_int16 = np.frombuffer(data, dtype=np.int16)
 
                 logger.info(
-                    "Audio level: min=%d max=%d mean=%.1f rms=%.1f",
+                    "Audio level: min=%d max=%d mean=%.1f rms=%.1f | VAD=%.4f",
                     audio_int16.min(),
                     audio_int16.max(),
                     audio_int16.mean(),
                     np.sqrt(np.mean(audio_int16.astype(np.float32) ** 2)),
+                    speech_probability,
                 )
 
             except Exception:
@@ -694,7 +695,6 @@ def main():
                 )
 
                 continue
-            logger.info("After audio read: %d bytes", len(data))
 
             if not data:
 
@@ -746,11 +746,9 @@ def main():
             is_speech = False
             max_speech_probability = 0.0
 
-            logger.info("Before VAD")
             speech_probability = vad_model(
                 vad_audio
             )
-            logger.info("After VAD: %.4f", speech_probability)
 
             max_speech_probability = (
                 speech_probability
