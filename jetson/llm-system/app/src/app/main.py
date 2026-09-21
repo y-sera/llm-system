@@ -292,6 +292,13 @@ class SileroVAD:
             VAD_CHUNK,
         )
 
+        logger.info(
+            "VAD input: shape=%s dtype=%s state_shape=%s",
+            input_data.shape,
+            input_data.dtype,
+            self.state.shape,
+        )
+
         outputs = self.session.run(
             None,
             {
@@ -299,6 +306,11 @@ class SileroVAD:
                 "state": self.state,
                 "sr": self.sample_rate,
             },
+        )
+
+        logger.info(
+            "VAD outputs: %s",
+            [(o.shape, o.dtype) for o in outputs],
         )
 
         speech_probability = float(
@@ -659,7 +671,6 @@ def main():
             # Audio input
             # ------------------------------------------------
 
-            logger.info("Before audio read")
             try:
 
                 data = stream.read(
