@@ -30,10 +30,20 @@ INPUT_CHUNK = int(INPUT_RATE * CHUNK_MS / 1000)
 
 VAD_CHUNK = 512
 
-VAD_THRESHOLD = 0.5
+VAD_THRESHOLD = float(os.getenv("VAD_THRESHOLD", "0.3"))
 
-MIN_SPEECH_MS = 300
-MIN_SILENCE_MS = 700
+# Exit threshold for two-threshold hysteresis. While a recording is
+# active the lower VAD_THRESHOLD_END is used so short dips in the
+# speech probability do not stop the recording.
+VAD_THRESHOLD_END = float(os.getenv("VAD_THRESHOLD_END", "0.2"))
+
+# Linear gain applied ONLY to the float signal handed to the VAD model.
+# Does not affect the PCM saved to the WAV file. Raise this when the
+# microphone capture level is low (see the "VAD status" max_prob log).
+VAD_GAIN = float(os.getenv("VAD_GAIN", "4.0"))
+
+MIN_SPEECH_MS = int(os.getenv("MIN_SPEECH_MS", "150"))
+MIN_SILENCE_MS = int(os.getenv("MIN_SILENCE_MS", "700"))
 
 PRE_ROLL_MS = 300
 
@@ -292,7 +302,7 @@ class SileroVAD:
             VAD_CHUNK,
         )
 
-        logger.info(
+        logger.debug(
             "VAD input: shape=%s dtype=%s state_shape=%s",
             input_data.shape,
             input_data.dtype,
@@ -308,7 +318,7 @@ class SileroVAD:
             },
         )
 
-        logger.info(
+        logger.debug(
             "VAD outputs: %s",
             [(o.shape, o.dtype) for o in outputs],
         )
@@ -662,6 +672,7 @@ def main():
 
     # VAD diagnostic log
     last_vad_log_time = time.monotonic()
+    window_max_probability = 0.0
 
     try:
 
@@ -738,6 +749,18 @@ def main():
                 / 32768.0
             )
 
+            # Remove DC offset (Silero is trained on DC-free speech;
+            # a DC bias depresses the speech probability) and apply a
+            # linear gain for low USB-microphone capture levels.
+            # Clip to keep the model input within [-1.0, 1.0].
+            # The PCM written to the WAV file is left untouched.
+            vad_audio = vad_audio - vad_audio.mean()
+            vad_audio = np.clip(
+                vad_audio * VAD_GAIN,
+                -1.0,
+                1.0,
+            )
+
             # ------------------------------------------------
             # VAD
             # ------------------------------------------------
@@ -753,9 +776,22 @@ def main():
                 speech_probability
             )
 
+            # Track the highest probability seen since the last
+            # diagnostic log so thresholds can be calibrated.
+            if speech_probability > window_max_probability:
+                window_max_probability = speech_probability
+
+            # Two-threshold hysteresis: once recording has started,
+            # keep using the lower exit threshold so brief dips in the
+            # speech probability do not interrupt an utterance.
+            if speech_started:
+                active_threshold = VAD_THRESHOLD_END
+            else:
+                active_threshold = VAD_THRESHOLD
+
             if (
                 speech_probability
-                >= VAD_THRESHOLD
+                >= active_threshold
             ):
 
                 is_speech = True
@@ -771,14 +807,19 @@ def main():
                 >= 5.0
             ):
 
-                logger.debug(
-                    "VAD status: speech=%s probability=%.3f recording=%s",
+                logger.info(
+                    "VAD status: speech=%s max_prob=%.3f "
+                    "start=%.2f end=%.2f gain=%.1f recording=%s",
                     is_speech,
-                    max_speech_probability,
+                    window_max_probability,
+                    VAD_THRESHOLD,
+                    VAD_THRESHOLD_END,
+                    VAD_GAIN,
                     speech_started,
                 )
 
                 last_vad_log_time = now
+                window_max_probability = 0.0
 
             # ------------------------------------------------
             # Pre-roll
