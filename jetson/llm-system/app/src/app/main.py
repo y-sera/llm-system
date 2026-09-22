@@ -15,16 +15,21 @@ from openai import OpenAI
 # Configuration
 # ============================================================
 
-# Microphone now directly captures at the VAD sample rate.
-INPUT_RATE = 16000
+# Capture the microphone at its native rate (default 44.1 kHz) and
+# resample down to the VAD rate in software, the way the known-good
+# pipeline did. Forcing a USB microphone to capture directly at 16 kHz
+# (a non-native rate) makes some devices saturate on speech, which is
+# what broke VAD triggering. VAD_RATE must stay 16000 for the model.
+INPUT_RATE = int(os.getenv("AUDIO_INPUT_RATE", "44100"))
 VAD_RATE = 16000
 
 CHANNELS = 1
 FORMAT = pyaudio.paInt16
 
 # 32 ms audio chunks.
-# At 16 kHz this is exactly 512 samples, which is the
-# Silero VAD input size.
+# The capture block holds INPUT_CHUNK samples at INPUT_RATE and is
+# resampled to exactly VAD_CHUNK (512) samples at VAD_RATE, the size
+# the Silero VAD ONNX model expects.
 CHUNK_MS = 32
 INPUT_CHUNK = int(INPUT_RATE * CHUNK_MS / 1000)
 
@@ -46,11 +51,12 @@ VAD_GAIN = float(os.getenv("VAD_GAIN", "1.0"))
 # which the capture is treated as clipping, so the gain is not applied.
 VAD_CLIP_LIMIT = float(os.getenv("VAD_CLIP_LIMIT", "0.02"))
 
-# When enabled each VAD chunk is DC-removed then robustly peak-normalised
-# to a common working range, so one build behaves well for both very quiet
-# and very hot captures. Disabled falls back to the fixed VAD_GAIN above.
-# The saved WAV bytes are unaffected either way.
-VAD_AUTO_NORM = os.getenv("VAD_AUTO_NORM", "1") == "1"
+# Optional level conditioning applied to the signal handed to the VAD
+# model only (the saved WAV is always the original PCM). Off by default
+# so the resampled block is passed through unchanged, matching the
+# behaviour of the known-good 44.1 kHz pipeline; enable it only to
+# rescue very quiet or very hot captures.
+VAD_AUTO_NORM = os.getenv("VAD_AUTO_NORM", "0") == "1"
 VAD_TARGET_PEAK = float(os.getenv("VAD_TARGET_PEAK", "0.6"))
 VAD_MAX_NORM_GAIN = float(os.getenv("VAD_MAX_NORM_GAIN", "16.0"))
 
@@ -196,6 +202,45 @@ def save_wav(
             filename,
         )
         raise
+
+
+def resample_audio(
+    audio_int16: np.ndarray,
+    num: int,
+) -> np.ndarray:
+    """
+    Resample one int16 capture block to ``num`` samples using a
+    band-limited FFT resampler (the numpy-only equivalent of
+    ``scipy.signal.resample``), so no extra dependency is needed.
+
+    The microphone is captured at its native rate and resampled here,
+    which is what the known-good pipeline did: forcing a USB microphone
+    to sample directly at 16 kHz (a non-native rate) makes some devices
+    saturate on speech. The returned signal is float32 in roughly
+    ``[-1.0, 1.0]``.
+    """
+
+    x = audio_int16.astype(np.float32) / 32768.0
+
+    n = len(x)
+
+    if num == n:
+        return x.astype(np.float32)
+
+    spectrum = np.fft.fft(x)
+
+    rescaled = np.zeros(num, dtype=spectrum.dtype)
+
+    keep = min(n, num) // 2
+
+    rescaled[:keep + 1] = spectrum[:keep + 1]
+    rescaled[num - keep:] = spectrum[n - keep:]
+
+    rescaled = rescaled * (num / n)
+
+    return np.fft.ifft(rescaled, n=num).real.astype(
+        np.float32
+    )
 
 
 # ============================================================
@@ -735,7 +780,7 @@ def main():
                 continue
 
             # ------------------------------------------------
-            # 16 kHz PCM -> float32
+            # Capture block -> int16 (also the bytes saved as WAV)
             # ------------------------------------------------
 
             audio = np.frombuffer(
@@ -751,42 +796,34 @@ def main():
 
                 continue
 
-            if len(audio) != VAD_CHUNK:
+            if len(audio) != INPUT_CHUNK:
 
                 logger.warning(
                     "Unexpected audio chunk size: %d samples "
                     "(expected %d)",
                     len(audio),
-                    VAD_CHUNK,
+                    INPUT_CHUNK,
                 )
 
                 continue
 
-            vad_audio = (
-                audio.astype(
-                    np.float32
-                )
-                / 32768.0
+            # Resample the 32 ms capture block from the microphone's
+            # native rate (default 44.1 kHz) down to the VAD model's
+            # 16 kHz, yielding exactly the 512-sample window the ONNX
+            # model expects. The saved WAV still uses the untouched
+            # original PCM captured at INPUT_RATE.
+            vad_audio = resample_audio(
+                audio,
+                VAD_CHUNK,
             )
 
-            # Remove DC offset (Silero is trained on DC-free speech;
-            # a DC bias depresses the speech probability). The saved WAV
-            # bytes come from the original PCM and are never touched here.
-            vad_audio = vad_audio - vad_audio.mean()
-
-            # Fraction of samples pinned at the int16 rails. Computed on
-            # float magnitudes so int16 does not overflow at -32768.
-            _f32 = audio.astype(np.float32)
-            _clip_ratio = float(
-                np.mean(np.abs(_f32) >= 32000.0)
-            )
-
+            # Optional level conditioning, disabled by default so the
+            # block is handed to the model exactly as resampled (the
+            # behaviour of the known-good 44.1 kHz pipeline). Enable it
+            # only for very quiet or very hot sources via the VAD_* knobs.
             if VAD_AUTO_NORM:
-                # Robust peak target via a high percentile so a handful of
-                # clipped samples does not defeat normalisation. The cap
-                # keeps a silent noise floor from being boosted without
-                # limit. This lifts quiet capture and attenuates hot
-                # capture toward one working range for the VAD model.
+                vad_audio = vad_audio - vad_audio.mean()
+
                 _peak = float(
                     np.percentile(np.abs(vad_audio), 99.0)
                 )
@@ -798,9 +835,15 @@ def main():
                     )
 
                     vad_audio = vad_audio * _scale
-            else:
-                # Fixed manual gain, but never applied to a clipping chunk
-                # (amplifying a square wave only hurts the VAD score).
+            elif VAD_GAIN != 1.0:
+                # Fixed manual gain, but never on a clipping block.
+                _clip_ratio = float(
+                    np.mean(
+                        np.abs(vad_audio)
+                        >= (32000.0 / 32768.0)
+                    )
+                )
+
                 if _clip_ratio <= VAD_CLIP_LIMIT:
                     vad_audio = vad_audio * VAD_GAIN
 
