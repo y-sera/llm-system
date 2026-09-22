@@ -29,8 +29,6 @@ spec:
           value: http://192.168.1.97:8080/v1
         - name: OPENAI_MODEL
           value: google/gemma-4-E2B-it-qat-q4_0-gguf
-        - name: AUDIO_INPUT_RATE
-          value: "16000"
         - name: LOG_LEVEL
           value: "INFO"
         - name: VAD_THRESHOLD

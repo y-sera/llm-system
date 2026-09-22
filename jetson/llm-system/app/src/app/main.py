@@ -15,22 +15,18 @@ from openai import OpenAI
 # Configuration
 # ============================================================
 
-# Capture the microphone directly at the VAD rate (16 kHz). The Silero
-# VAD ONNX model consumes 512-sample windows at 16 kHz, so capturing at
-# 16 kHz natively makes each 32 ms capture block exactly one model window
-# and removes the need for a software resampler. AUDIO_INPUT_RATE must
-# therefore stay equal to VAD_RATE (16000); both the chunk-size guard
-# below and the model's own input validation reject any other value.
-INPUT_RATE = int(os.getenv("AUDIO_INPUT_RATE", "16000"))
-VAD_RATE = 16000
+# Single fixed sample rate (Hz) for the whole pipeline: the microphone is
+# captured directly at this rate and the Silero VAD ONNX model consumes
+# windows at it (512-sample chunks at 16 kHz), so no resampler is needed.
+AUDIO_INPUT_RATE = 16000
 
 CHANNELS = 1
 FORMAT = pyaudio.paInt16
 
-# 32 ms audio chunks. At 16 kHz this is exactly VAD_CHUNK (512) samples,
-# the window size the Silero VAD ONNX model expects.
+# 32 ms blocks: AUDIO_INPUT_RATE * CHUNK_MS / 1000 = 512 samples, exactly
+# the window the VAD model expects.
 CHUNK_MS = 32
-INPUT_CHUNK = int(INPUT_RATE * CHUNK_MS / 1000)
+INPUT_CHUNK = int(AUDIO_INPUT_RATE * CHUNK_MS / 1000)
 
 VAD_CHUNK = 512
 
@@ -258,7 +254,7 @@ class SileroVAD:
         # The ONNX model expects every 512-sample window to be preceded by a
         # 64-sample overlap context (4 ms at 16 kHz), exactly like the
         # upstream OnnxWrapper does. Carry that context across chunks.
-        self.context_size = 64 if VAD_RATE == 16000 else 32
+        self.context_size = 64
         self.context = np.zeros(
             (1, self.context_size),
             dtype=np.float32,
@@ -266,7 +262,7 @@ class SileroVAD:
 
         # "sr" must be a zero-dimensional (scalar) int64 tensor, not [sr].
         self.sample_rate = np.array(
-            VAD_RATE,
+            AUDIO_INPUT_RATE,
             dtype=np.int64,
         )
 
@@ -487,10 +483,9 @@ def process_recording(
 
     try:
 
-        # Audio is now captured directly at 16 kHz.
         wav_data = pcm_to_wav_bytes(
             pcm_data,
-            INPUT_RATE,
+            AUDIO_INPUT_RATE,
             CHANNELS,
             2,
         )
@@ -576,13 +571,8 @@ def main():
     )
 
     logger.info(
-        "  input_rate=%d Hz",
-        INPUT_RATE,
-    )
-
-    logger.info(
-        "  vad_rate=%d Hz",
-        VAD_RATE,
+        "  sample_rate=%d Hz",
+        AUDIO_INPUT_RATE,
     )
 
     logger.info(
@@ -653,7 +643,7 @@ def main():
             format=FORMAT,
             channels=CHANNELS,
 
-            rate=INPUT_RATE,
+            rate=AUDIO_INPUT_RATE,
 
             input=True,
             input_device_index=device_index,
@@ -674,7 +664,7 @@ def main():
     logger.info(
         "Audio stream opened: "
         "rate=%d chunk=%d",
-        INPUT_RATE,
+        AUDIO_INPUT_RATE,
         INPUT_CHUNK,
     )
 
@@ -789,10 +779,11 @@ def main():
 
                 continue
 
-            # Capture already runs at the VAD rate (16 kHz), so the block
-            # is exactly VAD_CHUNK samples; just convert the int16 block
-            # to a float32 [-1.0, 1.0] window for the model. The saved
-            # WAV keeps the untouched int16 PCM captured at INPUT_RATE.
+            # Capture already runs at AUDIO_INPUT_RATE (16 kHz), so the
+            # block is exactly VAD_CHUNK samples; just convert the int16
+            # block to a float32 [-1.0, 1.0] window for the model. The
+            # saved WAV keeps the untouched int16 PCM captured at that
+            # same rate.
             vad_audio = audio.astype(np.float32) / 32768.0
 
             # Optional level conditioning. When enabled it strips any DC
