@@ -771,7 +771,7 @@ def main():
                 _ac_rms = float(np.sqrt(np.mean((_f - _dc) ** 2)))
                 _clip = float(np.mean(np.abs(_f) >= 32000.0))
 
-                logger.info(
+                logger.debug(
                     "Audio level: min=%d max=%d mean=%.1f "
                     "rms=%.1f ac_rms=%.1f clip=%.3f",
                     int(audio_int16.min()),
