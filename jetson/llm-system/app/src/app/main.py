@@ -15,21 +15,20 @@ from openai import OpenAI
 # Configuration
 # ============================================================
 
-# Capture the microphone at its native rate (default 44.1 kHz) and
-# resample down to the VAD rate in software, the way the known-good
-# pipeline did. Forcing a USB microphone to capture directly at 16 kHz
-# (a non-native rate) makes some devices saturate on speech, which is
-# what broke VAD triggering. VAD_RATE must stay 16000 for the model.
-INPUT_RATE = int(os.getenv("AUDIO_INPUT_RATE", "44100"))
+# Capture the microphone directly at the VAD rate (16 kHz). The Silero
+# VAD ONNX model consumes 512-sample windows at 16 kHz, so capturing at
+# 16 kHz natively makes each 32 ms capture block exactly one model window
+# and removes the need for a software resampler. AUDIO_INPUT_RATE must
+# therefore stay equal to VAD_RATE (16000); both the chunk-size guard
+# below and the model's own input validation reject any other value.
+INPUT_RATE = int(os.getenv("AUDIO_INPUT_RATE", "16000"))
 VAD_RATE = 16000
 
 CHANNELS = 1
 FORMAT = pyaudio.paInt16
 
-# 32 ms audio chunks.
-# The capture block holds INPUT_CHUNK samples at INPUT_RATE and is
-# resampled to exactly VAD_CHUNK (512) samples at VAD_RATE, the size
-# the Silero VAD ONNX model expects.
+# 32 ms audio chunks. At 16 kHz this is exactly VAD_CHUNK (512) samples,
+# the window size the Silero VAD ONNX model expects.
 CHUNK_MS = 32
 INPUT_CHUNK = int(INPUT_RATE * CHUNK_MS / 1000)
 
@@ -53,9 +52,9 @@ VAD_CLIP_LIMIT = float(os.getenv("VAD_CLIP_LIMIT", "0.02"))
 
 # Optional level conditioning applied to the signal handed to the VAD
 # model only (the saved WAV is always the original PCM). Off by default
-# so the resampled block is passed through unchanged, matching the
-# behaviour of the known-good 44.1 kHz pipeline; enable it only to
-# rescue very quiet or very hot captures.
+# so the captured block is passed through unchanged; enable it
+# (VAD_AUTO_NORM=1) to strip DC and peak-normalise very quiet or very
+# hot captures. The deployment enables this by default.
 VAD_AUTO_NORM = os.getenv("VAD_AUTO_NORM", "0") == "1"
 VAD_TARGET_PEAK = float(os.getenv("VAD_TARGET_PEAK", "0.6"))
 VAD_MAX_NORM_GAIN = float(os.getenv("VAD_MAX_NORM_GAIN", "16.0"))
@@ -204,45 +203,6 @@ def save_wav(
         raise
 
 
-def resample_audio(
-    audio_int16: np.ndarray,
-    num: int,
-) -> np.ndarray:
-    """
-    Resample one int16 capture block to ``num`` samples using a
-    band-limited FFT resampler (the numpy-only equivalent of
-    ``scipy.signal.resample``), so no extra dependency is needed.
-
-    The microphone is captured at its native rate and resampled here,
-    which is what the known-good pipeline did: forcing a USB microphone
-    to sample directly at 16 kHz (a non-native rate) makes some devices
-    saturate on speech. The returned signal is float32 in roughly
-    ``[-1.0, 1.0]``.
-    """
-
-    x = audio_int16.astype(np.float32) / 32768.0
-
-    n = len(x)
-
-    if num == n:
-        return x.astype(np.float32)
-
-    spectrum = np.fft.fft(x)
-
-    rescaled = np.zeros(num, dtype=spectrum.dtype)
-
-    keep = min(n, num) // 2
-
-    rescaled[:keep + 1] = spectrum[:keep + 1]
-    rescaled[num - keep:] = spectrum[n - keep:]
-
-    rescaled = rescaled * (num / n)
-
-    return np.fft.ifft(rescaled, n=num).real.astype(
-        np.float32
-    )
-
-
 # ============================================================
 # Silero VAD - ONNX Runtime
 # ============================================================
@@ -253,14 +213,17 @@ class SileroVAD:
 
     The standard Silero VAD ONNX model expects:
 
-        input : [1, 512] float32
+        input : [1, 576] float32  (64-sample context + 512-sample window)
         state : [2, 1, 128] float32
-        sr    : [1] int64
+        sr    : scalar int64 (16000)
 
     and returns:
 
         output : speech probability
         state  : updated recurrent state
+
+    The trailing 64 samples of each input are carried over and prepended
+    as the context of the next call, matching the upstream OnnxWrapper.
     """
 
     def __init__(
@@ -826,20 +789,16 @@ def main():
 
                 continue
 
-            # Resample the 32 ms capture block from the microphone's
-            # native rate (default 44.1 kHz) down to the VAD model's
-            # 16 kHz, yielding exactly the 512-sample window the ONNX
-            # model expects. The saved WAV still uses the untouched
-            # original PCM captured at INPUT_RATE.
-            vad_audio = resample_audio(
-                audio,
-                VAD_CHUNK,
-            )
+            # Capture already runs at the VAD rate (16 kHz), so the block
+            # is exactly VAD_CHUNK samples; just convert the int16 block
+            # to a float32 [-1.0, 1.0] window for the model. The saved
+            # WAV keeps the untouched int16 PCM captured at INPUT_RATE.
+            vad_audio = audio.astype(np.float32) / 32768.0
 
-            # Optional level conditioning, disabled by default so the
-            # block is handed to the model exactly as resampled (the
-            # behaviour of the known-good 44.1 kHz pipeline). Enable it
-            # only for very quiet or very hot sources via the VAD_* knobs.
+            # Optional level conditioning. When enabled it strips any DC
+            # offset and peak-normalises the block before the model sees
+            # it; otherwise the captured block is handed over unchanged.
+            # Controlled by the VAD_* knobs.
             if VAD_AUTO_NORM:
                 vad_audio = vad_audio - vad_audio.mean()
 
