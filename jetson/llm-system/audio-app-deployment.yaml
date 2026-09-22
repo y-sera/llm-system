@@ -40,7 +40,7 @@ spec:
         - name: VAD_GAIN
           value: "1.0"
         - name: VAD_AUTO_NORM
-          value: "0"
+          value: "1"
         - name: VAD_TARGET_PEAK
           value: "0.6"
         - name: VAD_MAX_NORM_GAIN

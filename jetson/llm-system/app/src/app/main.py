@@ -292,8 +292,18 @@ class SileroVAD:
             dtype=np.float32,
         )
 
+        # The ONNX model expects every 512-sample window to be preceded by a
+        # 64-sample overlap context (4 ms at 16 kHz), exactly like the
+        # upstream OnnxWrapper does. Carry that context across chunks.
+        self.context_size = 64 if VAD_RATE == 16000 else 32
+        self.context = np.zeros(
+            (1, self.context_size),
+            dtype=np.float32,
+        )
+
+        # "sr" must be a zero-dimensional (scalar) int64 tensor, not [sr].
         self.sample_rate = np.array(
-            [VAD_RATE],
+            VAD_RATE,
             dtype=np.int64,
         )
 
@@ -316,9 +326,10 @@ class SileroVAD:
 
     def reset(self):
         """
-        Reset recurrent VAD state.
+        Reset recurrent VAD state and the cross-chunk context buffer.
         """
         self.state.fill(0)
+        self.context.fill(0)
 
     def __call__(
         self,
@@ -354,9 +365,16 @@ class SileroVAD:
                 f"got {len(chunk)}"
             )
 
-        input_data = chunk.reshape(
+        window = chunk.reshape(
             1,
             VAD_CHUNK,
+        )
+
+        # Prepend the previous chunk's trailing context (upstream contract:
+        # the model input length is context_size + VAD_CHUNK = 64 + 512).
+        input_data = np.concatenate(
+            [self.context, window],
+            axis=1,
         )
 
         logger.debug(
@@ -384,8 +402,9 @@ class SileroVAD:
             np.asarray(outputs[0]).reshape(-1)[0]
         )
 
-        # The second output is the updated recurrent state.
+        # Feed back the recurrent state and the trailing context window.
         self.state = outputs[1]
+        self.context = input_data[:, -self.context_size:].copy()
 
         return speech_probability
 
@@ -1001,6 +1020,8 @@ def main():
                         silence_frames = 0
                         utterance_frames = []
 
+                        vad_model.reset()
+
             # ------------------------------------------------
             # Maximum utterance length
             # ------------------------------------------------
@@ -1034,6 +1055,8 @@ def main():
                 speech_frames = 0
                 silence_frames = 0
                 utterance_frames = []
+
+                vad_model.reset()
 
     except KeyboardInterrupt:
 

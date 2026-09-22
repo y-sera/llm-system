@@ -24,9 +24,10 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --no-editable
 
 RUN mkdir -p /app/models && \
-    curl -L \
-      https://github.com/snakers4/silero-vad/raw/master/src/silero_vad/data/silero_vad.onnx \
-      -o /app/models/silero_vad.onnx
+    curl --fail --location --retry 5 --retry-delay 5 \
+      -o /app/models/silero_vad.onnx \
+      https://github.com/snakers4/silero-vad/raw/master/src/silero_vad/data/silero_vad.onnx && \
+    [ "$(wc -c < /app/models/silero_vad.onnx)" -gt 1000000 ]
 
 ## for update pyproject.toml and uv.lock
 ## docker build --target dev -t localhost/audio-app:dev .
