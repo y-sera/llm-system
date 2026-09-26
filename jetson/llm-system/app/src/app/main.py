@@ -1,465 +1,31 @@
-import base64
-import io
-import logging
 import os
-import time
-import wave
 
 import numpy as np
-import onnxruntime as ort
 import pyaudio
-from openai import OpenAI
 
-
-# ============================================================
-# Configuration
-# ============================================================
-
-# Single fixed sample rate (Hz) for the whole pipeline: the microphone is
-# captured directly at this rate and the Silero VAD ONNX model consumes
-# windows at it (512-sample chunks at 16 kHz), so no resampler is needed.
-AUDIO_INPUT_RATE = 16000
-
-CHANNELS = 1
-FORMAT = pyaudio.paInt16
-
-# 32 ms blocks: AUDIO_INPUT_RATE * CHUNK_MS / 1000 = 512 samples, exactly
-# the window the VAD model expects.
-CHUNK_MS = 32
-INPUT_CHUNK = int(AUDIO_INPUT_RATE * CHUNK_MS / 1000)
-
-VAD_CHUNK = 512
-
-VAD_THRESHOLD = float(os.getenv("VAD_THRESHOLD", "0.3"))
-
-# Exit threshold for two-threshold hysteresis. While a recording is
-# active the lower VAD_THRESHOLD_END is used so short dips in the
-# speech probability do not stop the recording.
-VAD_THRESHOLD_END = float(os.getenv("VAD_THRESHOLD_END", "0.2"))
-
-# Linear gain applied ONLY to the float signal handed to the VAD model.
-# Does not affect the PCM saved to the WAV file. Only used when the
-# automatic VAD normalisation is disabled (VAD_AUTO_NORM=0).
-VAD_GAIN = float(os.getenv("VAD_GAIN", "1.0"))
-
-# Saturation guard: fraction of a chunk pinned at the int16 rails above
-# which the capture is treated as clipping, so the gain is not applied.
-VAD_CLIP_LIMIT = float(os.getenv("VAD_CLIP_LIMIT", "0.02"))
-
-# Optional level conditioning applied to the signal handed to the VAD
-# model only (the saved WAV is always the original PCM). Off by default
-# so the captured block is passed through unchanged; enable it
-# (VAD_AUTO_NORM=1) to strip DC and peak-normalise very quiet or very
-# hot captures. The deployment enables this by default.
-VAD_AUTO_NORM = os.getenv("VAD_AUTO_NORM", "0") == "1"
-VAD_TARGET_PEAK = float(os.getenv("VAD_TARGET_PEAK", "0.6"))
-VAD_MAX_NORM_GAIN = float(os.getenv("VAD_MAX_NORM_GAIN", "16.0"))
-
-MIN_SPEECH_MS = int(os.getenv("MIN_SPEECH_MS", "150"))
-MIN_SILENCE_MS = int(os.getenv("MIN_SILENCE_MS", "700"))
-
-PRE_ROLL_MS = 300
-
-MAX_UTTERANCE_MS = 10000
-
-OUTPUT_DIR = os.getenv(
-    "OUTPUT_DIR",
-    "./recordings",
+from .audio import (
+    debug_log_input_level,
+    find_audio_device,
+    pcm_to_wav_bytes,
+    prepare_vad_block,
+    save_wav,
 )
-
-VAD_MODEL_PATH = os.getenv(
-    "VAD_MODEL_PATH",
-    "/app/models/silero_vad.onnx",
+from .config import (
+    AUDIO_INPUT_RATE,
+    CHANNELS,
+    FORMAT,
+    INPUT_CHUNK,
+    OUTPUT_DIR,
+    VAD_MODEL_PATH,
 )
-
-
-# ============================================================
-# OpenAI configuration
-# ============================================================
-
-OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
-OPENAI_BASE_URL = os.environ["OPENAI_BASE_URL"]
-OPENAI_MODEL = os.environ["OPENAI_MODEL"]
-
-OPENAI_PROMPT = os.getenv(
-    "OPENAI_PROMPT",
-    (
-        "この音声を日本語で"
-        "文字起こししてください。"
-        "音声に含まれている発話だけを"
-        "返してください。"
-        "説明や補足は不要です。"
-    ),
+from .logging_config import logger
+from .segmentation import UtteranceSegmenter
+from .transcription import (
+    OPENAI_BASE_URL,
+    OPENAI_MODEL,
+    transcribe_wav,
 )
-
-
-# ============================================================
-# Logging
-# ============================================================
-
-LOG_LEVEL = os.getenv(
-    "LOG_LEVEL",
-    "INFO",
-).upper()
-
-logging.basicConfig(
-    level=getattr(
-        logging,
-        LOG_LEVEL,
-        logging.INFO,
-    ),
-    format=(
-        "%(asctime)s "
-        "%(levelname)s "
-        "%(name)s: "
-        "%(message)s"
-    ),
-    handlers=[
-        logging.StreamHandler()
-    ],
-)
-
-logger = logging.getLogger("audio-app")
-
-
-# ============================================================
-# OpenAI client
-# ============================================================
-
-client = OpenAI(
-    api_key=OPENAI_API_KEY,
-    base_url=OPENAI_BASE_URL,
-)
-
-
-# ============================================================
-# Audio utility
-# ============================================================
-
-def find_audio_device(pa):
-    for i in range(pa.get_device_count()):
-        info = pa.get_device_info_by_index(i)
-
-        logger.info(
-            "Audio device %d: name=%s input_channels=%s",
-            i,
-            info["name"],
-            info["maxInputChannels"],
-        )
-
-        if (
-            info["maxInputChannels"] > 0
-            and "USB Microphone" in info["name"]
-        ):
-            return i
-
-    raise RuntimeError("USB Microphone not found")
-
-
-def pcm_to_wav_bytes(
-    pcm_data: bytes,
-    sample_rate: int,
-    channels: int = 1,
-    sample_width: int = 2,
-) -> bytes:
-
-    buffer = io.BytesIO()
-
-    with wave.open(buffer, "wb") as wf:
-        wf.setnchannels(channels)
-        wf.setsampwidth(sample_width)
-        wf.setframerate(sample_rate)
-        wf.writeframes(pcm_data)
-
-    return buffer.getvalue()
-
-
-def save_wav(
-    wav_data: bytes,
-    filename: str,
-) -> None:
-
-    try:
-        directory = os.path.dirname(filename)
-
-        if directory:
-            os.makedirs(
-                directory,
-                exist_ok=True,
-            )
-
-        with open(filename, "wb") as f:
-            f.write(wav_data)
-
-    except Exception:
-        logger.exception(
-            "Failed to save WAV: %s",
-            filename,
-        )
-        raise
-
-
-# ============================================================
-# Silero VAD - ONNX Runtime
-# ============================================================
-
-class SileroVAD:
-    """
-    Silero VAD using ONNX Runtime.
-
-    The standard Silero VAD ONNX model expects:
-
-        input : [1, 576] float32  (64-sample context + 512-sample window)
-        state : [2, 1, 128] float32
-        sr    : scalar int64 (16000)
-
-    and returns:
-
-        output : speech probability
-        state  : updated recurrent state
-
-    The trailing 64 samples of each input are carried over and prepended
-    as the context of the next call, matching the upstream OnnxWrapper.
-    """
-
-    def __init__(
-        self,
-        model_path: str,
-    ):
-        logger.info(
-            "Loading Silero VAD ONNX model: %s",
-            model_path,
-        )
-
-        self.session = ort.InferenceSession(
-            model_path,
-            providers=[
-                "CPUExecutionProvider",
-            ],
-        )
-
-        providers = self.session.get_providers()
-
-        logger.info(
-            "Silero VAD ONNX providers: %s",
-            providers,
-        )
-
-        # Silero VAD recurrent state.
-        self.state = np.zeros(
-            (2, 1, 128),
-            dtype=np.float32,
-        )
-
-        # The ONNX model expects every 512-sample window to be preceded by a
-        # 64-sample overlap context (4 ms at 16 kHz), exactly like the
-        # upstream OnnxWrapper does. Carry that context across chunks.
-        self.context_size = 64
-        self.context = np.zeros(
-            (1, self.context_size),
-            dtype=np.float32,
-        )
-
-        # "sr" must be a zero-dimensional (scalar) int64 tensor, not [sr].
-        self.sample_rate = np.array(
-            AUDIO_INPUT_RATE,
-            dtype=np.int64,
-        )
-
-        # Log model I/O information once.
-        for input_meta in self.session.get_inputs():
-            logger.debug(
-                "VAD input: name=%s shape=%s type=%s",
-                input_meta.name,
-                input_meta.shape,
-                input_meta.type,
-            )
-
-        for output_meta in self.session.get_outputs():
-            logger.debug(
-                "VAD output: name=%s shape=%s type=%s",
-                output_meta.name,
-                output_meta.shape,
-                output_meta.type,
-            )
-
-    def reset(self):
-        """
-        Reset recurrent VAD state and the cross-chunk context buffer.
-        """
-        self.state.fill(0)
-        self.context.fill(0)
-
-    def __call__(
-        self,
-        chunk: np.ndarray,
-    ) -> float:
-        """
-        Run VAD inference for one 512-sample chunk.
-
-        Input:
-            float32 numpy array
-            shape: (512,)
-            range: approximately [-1.0, 1.0]
-
-        Returns:
-            Speech probability.
-        """
-
-        if chunk.dtype != np.float32:
-            chunk = chunk.astype(
-                np.float32,
-                copy=False,
-            )
-
-        if chunk.ndim != 1:
-            raise ValueError(
-                f"Expected 1-D audio chunk, "
-                f"got shape={chunk.shape}"
-            )
-
-        if len(chunk) != VAD_CHUNK:
-            raise ValueError(
-                f"Expected {VAD_CHUNK} samples, "
-                f"got {len(chunk)}"
-            )
-
-        window = chunk.reshape(
-            1,
-            VAD_CHUNK,
-        )
-
-        # Prepend the previous chunk's trailing context (upstream contract:
-        # the model input length is context_size + VAD_CHUNK = 64 + 512).
-        input_data = np.concatenate(
-            [self.context, window],
-            axis=1,
-        )
-
-        logger.debug(
-            "VAD input: shape=%s dtype=%s state_shape=%s",
-            input_data.shape,
-            input_data.dtype,
-            self.state.shape,
-        )
-
-        outputs = self.session.run(
-            None,
-            {
-                "input": input_data,
-                "state": self.state,
-                "sr": self.sample_rate,
-            },
-        )
-
-        logger.debug(
-            "VAD outputs: %s",
-            [(o.shape, o.dtype) for o in outputs],
-        )
-
-        speech_probability = float(
-            np.asarray(outputs[0]).reshape(-1)[0]
-        )
-
-        # Feed back the recurrent state and the trailing context window.
-        self.state = outputs[1]
-        self.context = input_data[:, -self.context_size:].copy()
-
-        return speech_probability
-
-
-# ============================================================
-# Transcription
-# ============================================================
-
-def transcribe_wav(
-    wav_data: bytes,
-) -> str | None:
-
-    logger.info(
-        "Sending audio to OpenAI-compatible API"
-    )
-
-    logger.debug(
-        "API request: base_url=%s model=%s audio_size=%d bytes",
-        OPENAI_BASE_URL,
-        OPENAI_MODEL,
-        len(wav_data),
-    )
-
-    # --------------------------------------------------------
-    # WAV -> Base64
-    # --------------------------------------------------------
-
-    audio_data = base64.b64encode(
-        wav_data
-    ).decode("ascii")
-
-    try:
-
-        response = client.chat.completions.create(
-            model=OPENAI_MODEL,
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": OPENAI_PROMPT,
-                        },
-                        {
-                            "type": "input_audio",
-                            "input_audio": {
-                                "data": audio_data,
-                                "format": "wav",
-                            },
-                        },
-                    ],
-                }
-            ],
-            temperature=0,
-        )
-
-    except Exception as e:
-
-        logger.exception(
-            "Transcription API request failed: %s",
-            e,
-        )
-
-        return None
-
-    logger.debug(
-        "API response received: %s",
-        response,
-    )
-
-    try:
-
-        text = response.choices[0].message.content
-
-    except (
-        AttributeError,
-        IndexError,
-        TypeError,
-    ):
-
-        logger.error(
-            "Unexpected API response: %r",
-            response,
-        )
-
-        return None
-
-    if not text:
-
-        logger.warning(
-            "API returned empty transcription"
-        )
-
-        return None
-
-    return text
+from .vad import SileroVAD
 
 
 # ============================================================
@@ -482,7 +48,6 @@ def process_recording(
     # --------------------------------------------------------
 
     try:
-
         wav_data = pcm_to_wav_bytes(
             pcm_data,
             AUDIO_INPUT_RATE,
@@ -510,7 +75,6 @@ def process_recording(
         )
 
     except Exception:
-
         logger.exception(
             "Recording processing failed while saving WAV"
         )
@@ -526,26 +90,19 @@ def process_recording(
     )
 
     if text:
-
         logger.info(
             "Transcription: %s",
             text,
         )
 
     else:
-
         logger.warning(
             "Transcription failed for recording #%04d",
             utterance_id,
         )
 
 
-# ============================================================
-# Main
-# ============================================================
-
 def main():
-
     os.makedirs(
         OUTPUT_DIR,
         exist_ok=True,
@@ -581,17 +138,15 @@ def main():
     )
 
     # --------------------------------------------------------
-    # Load Silero VAD
+    # Load the VAD model
     # --------------------------------------------------------
 
     try:
-
         vad_model = SileroVAD(
-            VAD_MODEL_PATH
+            VAD_MODEL_PATH,
         )
 
     except Exception:
-
         logger.exception(
             "Failed to load Silero VAD"
         )
@@ -602,9 +157,7 @@ def main():
     # Initialize PyAudio
     # --------------------------------------------------------
 
-    logger.info(
-        "Initializing PyAudio"
-    )
+    logger.info("Initializing PyAudio")
 
     pa = pyaudio.PyAudio()
 
@@ -614,17 +167,16 @@ def main():
     )
 
     try:
-
-        device_index = find_audio_device(pa)
+        device_index = find_audio_device(
+            pa,
+        )
 
         device_info = pa.get_device_info_by_index(
-            device_index
+            device_index,
         )
 
     except Exception:
-
         pa.terminate()
-
         raise
 
     logger.info(
@@ -638,122 +190,61 @@ def main():
     # --------------------------------------------------------
 
     try:
-
         stream = pa.open(
             format=FORMAT,
             channels=CHANNELS,
-
             rate=AUDIO_INPUT_RATE,
-
             input=True,
             input_device_index=device_index,
-
             frames_per_buffer=INPUT_CHUNK,
         )
 
     except Exception:
-
         logger.exception(
             "Failed to open audio input stream"
         )
 
         pa.terminate()
-
         raise
 
     logger.info(
-        "Audio stream opened: "
-        "rate=%d chunk=%d",
+        "Audio stream opened: rate=%d chunk=%d",
         AUDIO_INPUT_RATE,
         INPUT_CHUNK,
     )
 
-    logger.info(
-        "Listening..."
-    )
+    logger.info("Listening...")
 
-    speech_started = False
-
-    speech_frames = 0
-    silence_frames = 0
-
-    utterance_frames = []
-
-    pre_roll_frames = []
-
+    segmenter = UtteranceSegmenter()
     utterance_id = 1
 
-    min_speech_frames = int(
-        MIN_SPEECH_MS / CHUNK_MS
-    )
-
-    min_silence_frames = int(
-        MIN_SILENCE_MS / CHUNK_MS
-    )
-
-    max_utterance_frames = int(
-        MAX_UTTERANCE_MS / CHUNK_MS
-    )
-
-    pre_roll_frame_count = int(
-        PRE_ROLL_MS / CHUNK_MS
-    )
-
-    # VAD diagnostic log
-    last_vad_log_time = time.monotonic()
-    window_max_probability = 0.0
-
     try:
-
         while True:
-
-            # ------------------------------------------------
-            # Audio input
-            # ------------------------------------------------
-
             try:
 
                 data = stream.read(
                     INPUT_CHUNK,
                     exception_on_overflow=False,
                 )
-                audio_int16 = np.frombuffer(data, dtype=np.int16)
 
-                _f = audio_int16.astype(np.float32)
-                _dc = float(_f.mean())
-                _ac_rms = float(np.sqrt(np.mean((_f - _dc) ** 2)))
-                _clip = float(np.mean(np.abs(_f) >= 32000.0))
-
-                logger.debug(
-                    "Audio level: min=%d max=%d mean=%.1f "
-                    "rms=%.1f ac_rms=%.1f clip=%.3f",
-                    int(audio_int16.min()),
-                    int(audio_int16.max()),
-                    _dc,
-                    float(np.sqrt(np.mean(_f ** 2))),
-                    _ac_rms,
-                    _clip,
+                debug_log_input_level(
+                    np.frombuffer(
+                        data,
+                        dtype=np.int16,
+                    )
                 )
 
             except Exception:
-
                 logger.exception(
                     "Audio input read failed"
                 )
-
                 continue
 
             if not data:
-
                 logger.warning(
                     "Audio input returned empty data"
                 )
-
                 continue
-
-            # ------------------------------------------------
-            # Capture block -> int16 (also the bytes saved as WAV)
-            # ------------------------------------------------
 
             audio = np.frombuffer(
                 data,
@@ -761,264 +252,45 @@ def main():
             )
 
             if len(audio) == 0:
-
                 logger.warning(
                     "Audio input returned zero samples"
                 )
-
                 continue
 
             if len(audio) != INPUT_CHUNK:
-
                 logger.warning(
-                    "Unexpected audio chunk size: %d samples "
-                    "(expected %d)",
+                    "Unexpected audio chunk size: "
+                    "%d samples (expected %d)",
                     len(audio),
                     INPUT_CHUNK,
                 )
 
                 continue
 
-            # Capture already runs at AUDIO_INPUT_RATE (16 kHz), so the
-            # block is exactly VAD_CHUNK samples; just convert the int16
-            # block to a float32 [-1.0, 1.0] window for the model. The
-            # saved WAV keeps the untouched int16 PCM captured at that
-            # same rate.
-            vad_audio = audio.astype(np.float32) / 32768.0
-
-            # Optional level conditioning. When enabled it strips any DC
-            # offset and peak-normalises the block before the model sees
-            # it; otherwise the captured block is handed over unchanged.
-            # Controlled by the VAD_* knobs.
-            if VAD_AUTO_NORM:
-                vad_audio = vad_audio - vad_audio.mean()
-
-                _peak = float(
-                    np.percentile(np.abs(vad_audio), 99.0)
-                )
-
-                if _peak > 1e-4:
-                    _scale = min(
-                        VAD_TARGET_PEAK / _peak,
-                        VAD_MAX_NORM_GAIN,
-                    )
-
-                    vad_audio = vad_audio * _scale
-            elif VAD_GAIN != 1.0:
-                # Fixed manual gain, but never on a clipping block.
-                _clip_ratio = float(
-                    np.mean(
-                        np.abs(vad_audio)
-                        >= (32000.0 / 32768.0)
-                    )
-                )
-
-                if _clip_ratio <= VAD_CLIP_LIMIT:
-                    vad_audio = vad_audio * VAD_GAIN
-
-            vad_audio = np.clip(
-                vad_audio,
-                -1.0,
-                1.0,
-            )
-
-            # ------------------------------------------------
-            # VAD
-            # ------------------------------------------------
-
-            is_speech = False
-            max_speech_probability = 0.0
-
             speech_probability = vad_model(
-                vad_audio
+                prepare_vad_block(audio)
             )
 
-            max_speech_probability = (
-                speech_probability
+            pcm_data = segmenter.update(
+                speech_probability,
+                data,
             )
 
-            # Track the highest probability seen since the last
-            # diagnostic log so thresholds can be calibrated.
-            if speech_probability > window_max_probability:
-                window_max_probability = speech_probability
-
-            # Two-threshold hysteresis: once recording has started,
-            # keep using the lower exit threshold so brief dips in the
-            # speech probability do not interrupt an utterance.
-            if speech_started:
-                active_threshold = VAD_THRESHOLD_END
-            else:
-                active_threshold = VAD_THRESHOLD
-
-            if (
-                speech_probability
-                >= active_threshold
-            ):
-
-                is_speech = True
-
-            # ------------------------------------------------
-            # Periodic VAD diagnostic log
-            # ------------------------------------------------
-
-            now = time.monotonic()
-
-            if (
-                now - last_vad_log_time
-                >= 5.0
-            ):
-
-                logger.info(
-                    "VAD status: speech=%s max_prob=%.3f "
-                    "start=%.2f end=%.2f gain=%.1f recording=%s",
-                    is_speech,
-                    window_max_probability,
-                    VAD_THRESHOLD,
-                    VAD_THRESHOLD_END,
-                    VAD_GAIN,
-                    speech_started,
-                )
-
-                last_vad_log_time = now
-                window_max_probability = 0.0
-
-            # ------------------------------------------------
-            # Pre-roll
-            # ------------------------------------------------
-
-            pre_roll_frames.append(data)
-
-            if (
-                len(pre_roll_frames)
-                > pre_roll_frame_count
-            ):
-
-                pre_roll_frames.pop(0)
-
-            # ------------------------------------------------
-            # Speech
-            # ------------------------------------------------
-
-            if is_speech:
-
-                speech_frames += 1
-                silence_frames = 0
-
-                if not speech_started:
-
-                    if (
-                        speech_frames
-                        >= min_speech_frames
-                    ):
-
-                        speech_started = True
-
-                        utterance_frames = (
-                            pre_roll_frames.copy()
-                        )
-
-                        logger.info(
-                            "Recording started"
-                        )
-
-                else:
-
-                    utterance_frames.append(
-                        data
-                    )
-
-            # ------------------------------------------------
-            # Silence
-            # ------------------------------------------------
-
-            else:
-
-                silence_frames += 1
-
-                if speech_started:
-
-                    utterance_frames.append(
-                        data
-                    )
-
-                    if (
-                        silence_frames
-                        >= min_silence_frames
-                    ):
-
-                        logger.info(
-                            "Recording ended"
-                        )
-
-                        pcm_data = b"".join(
-                            utterance_frames
-                        )
-
-                        process_recording(
-                            pcm_data,
-                            utterance_id,
-                        )
-
-                        utterance_id += 1
-
-                        # ------------------------------------
-                        # Reset
-                        # ------------------------------------
-
-                        speech_started = False
-                        speech_frames = 0
-                        silence_frames = 0
-                        utterance_frames = []
-
-                        vad_model.reset()
-
-            # ------------------------------------------------
-            # Maximum utterance length
-            # ------------------------------------------------
-
-            if (
-                speech_started
-                and len(utterance_frames)
-                >= max_utterance_frames
-            ):
-
-                logger.warning(
-                    "Maximum utterance length reached"
-                )
-
-                logger.info(
-                    "Recording ended"
-                )
-
-                pcm_data = b"".join(
-                    utterance_frames
-                )
-
+            if pcm_data is not None:
                 process_recording(
                     pcm_data,
                     utterance_id,
                 )
 
                 utterance_id += 1
-
-                speech_started = False
-                speech_frames = 0
-                silence_frames = 0
-                utterance_frames = []
-
                 vad_model.reset()
 
     except KeyboardInterrupt:
-
-        logger.info(
-            "Stopping..."
-        )
+        logger.info("Stopping...")
 
     finally:
-
         stream.stop_stream()
         stream.close()
-
         pa.terminate()
 
         logger.info(
