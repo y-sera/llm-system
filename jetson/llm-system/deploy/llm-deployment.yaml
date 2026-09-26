@@ -33,6 +33,8 @@ spec:
           value: "off"
         - name: LLAMA_ARG_CACHE_PROMPT
           value: "false"
+        - name: LLAMA_ARG_CACHE_RAM
+          value: "0"
         - name: LLAMA_ARG_CTX_SIZE
           value: "4096"
         - name: LLAMA_ARG_PORT
