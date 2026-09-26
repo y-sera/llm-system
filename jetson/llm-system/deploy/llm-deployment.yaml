@@ -40,6 +40,13 @@ spec:
             secretKeyRef:
               name: hf-token-secret
               key: token
+        resources:
+          requests:
+            cpu: "2"
+            memory: 4Gi
+          limits:
+            cpu: "6"
+            memory: 8Gi
         volumeMounts:
         - name: cache-volume
           mountPath: /root/.cache/huggingface
@@ -48,7 +55,7 @@ spec:
       volumes:
       - name: cache-volume
         hostPath:
-          path: /home/yasuaki/.cache/huggingface/ 
+          path: /home/yasuaki/.cache/huggingface/
       - name: shm
         emptyDir:
           medium: Memory
