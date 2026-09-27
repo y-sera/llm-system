@@ -35,6 +35,10 @@ spec:
           value: "false"
         - name: LLAMA_ARG_CACHE_RAM
           value: "0"
+        - name: LLAMA_ARG_CACHE_IDLE_SLOTS
+          value: "false"
+        - name: LLAMA_ARG_N_PARALLEL
+          value: "1"
         - name: LLAMA_ARG_CTX_SIZE
           value: "4096"
         - name: LLAMA_ARG_PORT
@@ -49,7 +53,7 @@ spec:
             cpu: "2"
             memory: 2Gi
           limits:
-            cpu: "6"
+            cpu: "4"
             memory: 8Gi
         volumeMounts:
         - name: cache-volume
