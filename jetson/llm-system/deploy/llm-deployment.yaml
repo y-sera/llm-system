@@ -58,7 +58,7 @@ spec:
             memory: 3000Mi
           limits:
             cpu: "4"
-            memory: 5500Mi
+            memory: 6000Mi
         volumeMounts:
         - name: cache-volume
           mountPath: /root/.cache/huggingface
