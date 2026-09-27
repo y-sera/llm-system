@@ -51,10 +51,10 @@ spec:
         resources:
           requests:
             cpu: "2"
-            memory: 2Gi
+            memory: 3000Mi
           limits:
             cpu: "4"
-            memory: 8Gi
+            memory: 5500Mi
         volumeMounts:
         - name: cache-volume
           mountPath: /root/.cache/huggingface
