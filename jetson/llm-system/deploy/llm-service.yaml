@@ -12,10 +12,6 @@ spec:
     port: 8080
     protocol: TCP
     targetPort: 8080
-  - name: prometheus
-    port: 9090
-    protocol: TCP
-    targetPort: 9090
-   selector:
+  selector:
     app: gemma4-e2b
   type: LoadBalancer
