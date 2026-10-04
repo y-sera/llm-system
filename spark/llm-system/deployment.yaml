@@ -18,7 +18,7 @@ spec:
     spec:
       runtimeClassName: nvidia
       containers:
-      - image: vllm/vllm-openai:v0.28.0-ubuntu2404
+      - image: vllm/vllm-openai:v0.30.0-ubuntu2404
         name: main
         args:
         - "unsloth/Qwen3.8-27B-NVFP4"
