@@ -26,9 +26,11 @@ spec:
         - name: OPENAI_API_KEY
           value: dummy
         - name: OPENAI_BASE_URL
-          value: http://gemma4-e2b:8080/v1
+          #value: http://gemma4-e2b:8080/v1
+          value: http://gemma4-e2b-litert-lm:8080/v1
         - name: OPENAI_MODEL
-          value: google/gemma-4-E2B-it-qat-q4_0-gguf
+          #value: google/gemma-4-E2B-it-qat-q4_0-gguf
+          value: gemma-4-E2B-it-gpu.litertlm
         - name: LOG_LEVEL
           value: "INFO"
         - name: VAD_THRESHOLD
