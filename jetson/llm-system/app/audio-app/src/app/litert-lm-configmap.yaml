@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: litert-lm-config
+  namespace: llm-system
+data:
+  config.json: |
+    {
+      "default": {},
+      "models": {
+        "gemma4-E2B-it-gpu.litertlm": {
+          "backend": "gpu",
+          "audio_backend": "gpu"
+        }
+      }
+    }
+
