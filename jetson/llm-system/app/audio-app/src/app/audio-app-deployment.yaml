@@ -1,0 +1,52 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: audio-app
+  name: audio-app
+  namespace: llm-system
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: audio-app
+  template:
+    metadata:
+      labels:
+        app: audio-app
+    spec:
+      #runtimeClassName: nvidia
+      containers:
+      - image: harbor.cluster.orenet.net/llm-system/audio-app:latest
+        name: main
+        env:
+        - name: OPENAI_API_KEY
+          value: dummy
+        - name: OPENAI_BASE_URL
+          #value: http://gemma4-e2b:8080/v1
+          value: http://gemma4-e2b-litert-lm:8080/v1
+        - name: OPENAI_MODEL
+          #value: google/gemma-4-E2B-it-qat-q4_0-gguf
+          value: gemma-4-E2B-it-gpu.litertlm
+        - name: LOG_LEVEL
+          value: "INFO"
+        - name: VAD_THRESHOLD
+          value: "0.3"
+        - name: VAD_THRESHOLD_END
+          value: "0.2"
+        - name: VAD_GAIN
+          value: "1.0"
+        - name: VAD_AUTO_NORM
+          value: "1"
+        - name: VAD_TARGET_PEAK
+          value: "0.6"
+        - name: VAD_MAX_NORM_GAIN
+          value: "16.0"
+        - name: VAD_CLIP_LIMIT
+          value: "0.02"
+        resources:
+          limits:
+            devic.es/audio: 1
