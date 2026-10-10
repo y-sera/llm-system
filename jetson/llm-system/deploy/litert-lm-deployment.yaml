@@ -17,8 +17,9 @@ spec:
         app: gemma4-e2b-litert-lm
     spec:
       runtimeClassName: nvidia
-      initcontainers:
+      initContainers:
       - image: harbor.cluster.orenet.net/llm-system/litert-lm:latest
+        name: download-model
         command:
         - litert-lm
         - import
