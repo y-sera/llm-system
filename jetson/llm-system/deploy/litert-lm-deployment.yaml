@@ -43,7 +43,7 @@ spec:
           - --port=8080
           - --config=/root/.litert-lm/config.json
           - --verbose
-       resources:
+        resources:
           requests:
             cpu: "2"
             memory: 3000Mi
