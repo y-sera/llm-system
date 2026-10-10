@@ -10,5 +10,10 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv tool install litert-lm
 ENV PATH="${PATH}:/root/.local/bin"
 
+RUN apt update && \
+    apt install -y libvulkan1 && \
+    apt clean && \
+    rm -rf /var/lib/apt/lists/*
+
 # Run the application
 CMD ["litert-lm", "serve"]
