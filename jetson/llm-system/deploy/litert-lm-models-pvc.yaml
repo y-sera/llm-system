@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: model-cache-litert-lm
+  namespace: llm-system
+spec:
+  storageClassName: "local-path"
+  volumeName: model-cache-litert-lm
