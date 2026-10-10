@@ -31,7 +31,7 @@ OPENAI_PROMPT = os.getenv(
 #          ref: https://github.com/google-ai-edge/LiteRT-LM/blob/main/docs/api/cpp/conversation.md
 OPENAI_API_AUDIO_INPUT_TYPE = os.getenv("OPENAI_API_AUDIO_INPUT_TYPE", "input_audio")
 
-match OPEN_API_AUDIO_INPUT_TYPE:
+match OPENAI_API_AUDIO_INPUT_TYPE:
     case "input_audio":
         logger.info("OpenAI API audio input type: input_audio. OpenAI API compatible.")
     case "audio":
