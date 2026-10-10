@@ -4,5 +4,9 @@ metadata:
   name: model-cache-litert-lm
   namespace: llm-system
 spec:
-  storageClassName: "local-path"
-  volumeName: model-cache-litert-lm
+  storageClassName: local-path
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
