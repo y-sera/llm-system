@@ -8,9 +8,9 @@ data:
     {
       "default": {},
       "models": {
-        "gemma4-E2B-it-gpu.litertlm": {
+        "gemma4-E2B-it.litertlm": {
           "backend": "gpu",
-          "audio_backend": "gpu"
+          "audio_backend": "cpu"
         }
       }
     }
